@@ -1,0 +1,16 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: takeaway-counter-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: dev
+      POSTGRES_PASSWORD: dev
+      POSTGRES_DB: takeaway_dev
+    ports:
+      - "5432:5432"
+    volumes:
+      - takeaway_pg_data:/var/lib/postgresql/data
+
+volumes:
+  takeaway_pg_data:
