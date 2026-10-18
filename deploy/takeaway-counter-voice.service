@@ -1,0 +1,21 @@
+# The receptionist's voice server. Separate from the CRM's own service so a
+# CRM deploy never has to drop a live call. See README: "Going live on the phone".
+#
+# Install once, as root (adjust the path to wherever the app is checked out):
+#   cp deploy/takeaway-counter-voice.service /etc/systemd/system/
+#   systemctl daemon-reload && systemctl enable --now takeaway-counter-voice
+[Unit]
+Description=Takeaway Counter voice server (the phone receptionist)
+After=network.target
+
+[Service]
+User=deploy
+WorkingDirectory=/home/deploy/takeaway-counter
+Environment=NODE_ENV=production
+Environment=VOICE_PORT=4610
+ExecStart=/usr/bin/npx tsx src/voice-server/index.ts
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

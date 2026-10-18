@@ -1,0 +1,18 @@
+# The CRM (Next.js). Install once, as root:
+#   cp deploy/takeaway-counter.service /etc/systemd/system/
+#   systemctl daemon-reload && systemctl enable --now takeaway-counter
+[Unit]
+Description=Takeaway Counter CRM
+After=network.target postgresql.service
+
+[Service]
+User=deploy
+WorkingDirectory=/home/deploy/takeaway-counter
+Environment=NODE_ENV=production
+Environment=PORT=3100
+ExecStart=/usr/bin/npm start -- -p 3100
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

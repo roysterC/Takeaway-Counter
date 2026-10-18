@@ -261,7 +261,6 @@ describe("a whole call through the engine", () => {
 
   it("only places the order on the caller's own turn after the read-back", async () => {
     const placed: PlaceOrderInput[] = [];
-    let engine: ReceptionistEngine;
     const tools = orderTools({
       menu: MENU,
       delivery: { enabled: true, zones: MOCK_HIXON_ZONES, minOrderPence: 1500, freeOverPence: null },
@@ -276,7 +275,7 @@ describe("a whole call through the engine", () => {
       recentOrders: async () => [],
       saveMessage: async () => "m",
     });
-    engine = new ReceptionistEngine({
+    const engine: ReceptionistEngine = new ReceptionistEngine({
       client: scripted([
         // Turn 1: "Collection please, it's Dave."
         [use("t1", "set_order_type", { type: "collection" }), use("t2", "set_customer_details", { name: "Dave" })],

@@ -42,7 +42,8 @@ export async function GET(req: NextRequest) {
       ];
     }
     const orders = await prisma.order.findMany({ where, include: ORDER_INCLUDE, orderBy: { createdAt: "desc" }, take: 500 });
-    const counted = orders.filter((o) => o.status !== "cancelled");
+    // Test orders from the lab are listed but not counted as takings.
+    const counted = orders.filter((o) => o.status !== "cancelled" && o.source !== "lab");
     return NextResponse.json({
       date,
       orders: orders.map(orderView),

@@ -68,7 +68,8 @@ export type MenuMatch =
 /**
  * Find one menu item from a code and/or a name.
  *
- * A code that names exactly one item wins. A code shared by more than one
+ * A code that names exactly one item wins, unless a name given with it
+ * clearly means a different dish. A code shared by more than one
  * (22: quarter or half duck; 89: chicken or beef) is narrowed by the name if
  * one was given, otherwise the choices go back. A name is matched exactly
  * first, then by every word of it appearing in the item's name or aliases.
@@ -79,7 +80,18 @@ export function findMenuItem(menu: MenuEntry[], query: { code?: string | null; n
 
   if (code) {
     const byCode = menu.filter((m) => m.code && m.code.toLowerCase() === code);
-    if (byCode.length === 1) return { kind: "found", item: byCode[0] };
+    if (byCode.length === 1) {
+      // A number and a name that point at different dishes ("146, chicken
+      // chow mein": 146 is king prawn) is a mishearing on one side or the
+      // other. Ask, rather than let the number win and send the wrong dish.
+      if (name) {
+        const byName = matchByName(menu, name);
+        if (byName.length && !byName.includes(byCode[0])) {
+          return { kind: "choose", options: [byCode[0], ...byName.slice(0, 3)] };
+        }
+      }
+      return { kind: "found", item: byCode[0] };
+    }
     if (byCode.length > 1) {
       if (name) {
         const narrowed = matchByName(byCode, name);

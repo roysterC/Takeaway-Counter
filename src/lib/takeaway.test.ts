@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { normalisePostcode, quoteDelivery, tidyPrefix, zoneFor, MOCK_HIXON_ZONES, type DeliveryRules } from "./delivery";
-import { describeHours, openStatus, parseOpeningHours, spokenNextOpen, spokenTime } from "./hours";
+import { describeHours, openStatus, parseOpeningHours, shopDayRange, spokenNextOpen, spokenTime } from "./hours";
 import { findMenuItem, normaliseCode, type MenuEntry } from "./menu";
 import { formatPence, parsePounds, spokenPrice } from "./money";
 import { nextStatus } from "./orders";
@@ -102,6 +102,19 @@ describe("opening hours", () => {
     expect(describeHours(hours)).toBe("Monday and Tuesday: closed. Wednesday to Sunday: 5pm to half past 9");
   });
 
+  it("starts the shop's day at its own midnight, summer and winter", () => {
+    expect(shopDayRange("2026-10-18", tz)).toEqual({
+      start: new Date("2026-10-17T23:00:00Z"),
+      end: new Date("2026-10-18T23:00:00Z"),
+    });
+    // The clocks go back overnight on the 25th: a 25-hour day.
+    expect(shopDayRange("2026-10-25", tz)).toEqual({
+      start: new Date("2026-10-24T23:00:00Z"),
+      end: new Date("2026-10-26T00:00:00Z"),
+    });
+    expect(shopDayRange("not a date", tz)).toBeNull();
+  });
+
   it("treats a day with nothing usable as closed", () => {
     expect(parseOpeningHours([{ day: 3, open: "nonsense" }])[3].closed).toBe(false);
     expect(parseOpeningHours([])[3].closed).toBe(true);
@@ -167,6 +180,15 @@ describe("the menu", () => {
     expect(m.kind === "found" && m.item.code).toBe("108");
     const vague = findMenuItem(menu, { name: "spare ribs" });
     expect(vague.kind).toBe("choose");
+  });
+
+  it("asks when the number and the name point at different dishes", () => {
+    const m = findMenuItem(menu, { code: "146", name: "Chicken Chow Mein" });
+    expect(m.kind).toBe("choose");
+    expect(m.kind === "choose" && m.options.map((o) => o.code)).toEqual(["146", "147"]);
+    // A loose name that still fits the number is fine.
+    const ok = findMenuItem(menu, { code: "147", name: "chow mein" });
+    expect(ok.kind === "found" && ok.item.code).toBe("147");
   });
 
   it("finds set meals by letter and says nothing for dishes we don't do", () => {
