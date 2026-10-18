@@ -1,0 +1,41 @@
+import { cn } from "@/lib/utils";
+
+/**
+ * The title block at the top of every page.
+ *
+ * It exists because the pages had drifted: different heading sizes and weights,
+ * two different muted colours for the description, and one page bolting its
+ * buttons on in a row of its own. Individually invisible, collectively the
+ * thing that makes an app feel assembled rather than designed.
+ *
+ * Title only: the subtitle each page used to carry ("Scheduled follow-up
+ * calls with customers") told people what they were already looking at.
+ *
+ * `actions` keeps page-level buttons on the header's baseline instead of each
+ * page inventing its own row for them.
+ */
+export function PageHeader({
+  title,
+  actions,
+  className,
+}: {
+  title: string;
+  actions?: React.ReactNode;
+  className?: string;
+}) {
+  return (
+    <div
+      className={cn(
+        "flex items-start justify-between gap-4 flex-wrap",
+        className
+      )}
+    >
+      <div className="min-w-0">
+        <h1 className="font-heading text-[1.65rem] leading-tight font-semibold tracking-[-0.01em] text-foreground">
+          {title}
+        </h1>
+      </div>
+      {actions && <div className="flex items-center gap-2">{actions}</div>}
+    </div>
+  );
+}

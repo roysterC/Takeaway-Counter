@@ -1,0 +1,294 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ─────────────────────────────────────────────────────────────
+// Multi-tenancy + Auth
+//
+// Hixon is the first takeaway, but every row belongs to an organisation so a
+// second shop is a new row, not a fork.
+// ─────────────────────────────────────────────────────────────
+
+model Organization {
+  id                      String   @id @default(cuid())
+  name                    String
+  slug                    String   @unique
+  anthropicApiKeyOverride String?
+  enabled                 Boolean  @default(true)
+  // The next order number this shop hands out. Taken with an atomic increment
+  // in the same transaction as the order it numbers, so a phone order and a
+  // counter order saved at once can never share one.
+  nextOrderNumber         Int      @default(1001)
+  createdAt               DateTime @default(now())
+  updatedAt               DateTime @updatedAt
+
+  users          User[]
+  settings       OrganizationSettings?
+  phoneNumbers   PhoneNumber[]
+  customers      Customer[]
+  menuCategories MenuCategory[]
+  menuItems      MenuItem[]
+  orders         Order[]
+  calls          Call[]
+  messages       Message[]
+
+  @@map("tc_organizations")
+}
+
+model User {
+  id             String        @id @default(cuid())
+  email          String        @unique
+  name           String?
+  passwordHash   String?
+  role           String        @default("member") // member (counter staff), admin (owner), superAdmin
+  organizationId String?
+  /// Copied into the login cookie at sign-in. Raising it (a password changed
+  /// or reset) ends every session signed in before, on their next request.
+  sessionVersion Int           @default(0)
+  organization   Organization? @relation(fields: [organizationId], references: [id])
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  @@map("tc_users")
+}
+
+model OrganizationSettings {
+  id                  String       @id @default(cuid())
+  organizationId      String       @unique
+  organization        Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  // What the receptionist calls the shop: "Hixon Chinese Takeaway".
+  businessName        String
+  // The first thing a caller hears. Blank uses the default built from the
+  // business name (src/lib/receptionist/prompt.ts).
+  greeting            String?
+  voiceEnabled        Boolean      @default(false)
+  // Staff can pause phone orders on a busy night; the receptionist then
+  // apologises and takes no orders, but still answers "where's my order?".
+  acceptingOrders     Boolean      @default(true)
+  timezone            String       @default("Europe/London")
+  contactPhone        String?
+  address             String?
+  // [{ day: 0-6, closed, open: "HH:MM", close: "HH:MM" }], Sunday = 0.
+  openingHours        Json         @default("[]")
+  // The shop's own answers to common questions (allergens, parking, bank
+  // holidays), written in Settings. The receptionist answers only from this
+  // and the menu.
+  receptionistNotes   String?
+  // Quoted to callers and used for the time an order is promised. Read when
+  // the order is placed, not when the call starts, so staff turning them up
+  // on a busy night affects calls already in progress.
+  collectionMinutes   Int          @default(20)
+  deliveryMinutes     Int          @default(45)
+  deliveryEnabled     Boolean      @default(true)
+  // [{ name, prefixes: ["ST18 0"], feePence }]: a postcode is delivered to by
+  // the zone with the longest matching prefix. See src/lib/delivery.ts.
+  deliveryZones       Json         @default("[]")
+  minDeliveryPence    Int          @default(1500)
+  // Null: delivery is always charged.
+  freeDeliveryOverPence Int?
+  updatedAt           DateTime     @updatedAt
+
+  @@map("tc_organization_settings")
+}
+
+model PhoneNumber {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  number         String       @unique // E.164: the Twilio number callers ring
+  label          String?
+  active         Boolean      @default(true)
+  createdAt      DateTime     @default(now())
+
+  @@index([organizationId])
+  @@map("tc_phone_numbers")
+}
+
+// ─────────────────────────────────────────────────────────────
+// Customers
+// ─────────────────────────────────────────────────────────────
+
+model Customer {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  name           String?
+  // E.164. A takeaway knows its regulars by the number they ring from, so this
+  // is the identity key; null for a counter customer who gave no number.
+  phone          String?
+  // The delivery address last used. Each order keeps its own copy, so changing
+  // this never rewrites where an old order went.
+  addressLine1   String?
+  addressLine2   String?
+  town           String?
+  postcode       String?
+  // "Side door", "flat above the shop": read to the driver, not the kitchen.
+  deliveryNotes  String?
+  // Staff notes, e.g. "always asks for extra prawn crackers". Never read out.
+  notes          String?
+  orders         Order[]
+  calls          Call[]
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  @@unique([organizationId, phone])
+  @@index([organizationId, name])
+  @@map("tc_customers")
+}
+
+// ─────────────────────────────────────────────────────────────
+// Menu
+// ─────────────────────────────────────────────────────────────
+
+model MenuCategory {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  name           String
+  // Printed under the heading and told to the receptionist, e.g. "Contains
+  // peanuts" or "Served in a large container".
+  note           String?
+  sortOrder      Int          @default(0)
+  items          MenuItem[]
+
+  @@index([organizationId, sortOrder])
+  @@map("tc_menu_categories")
+}
+
+model MenuItem {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  categoryId     String
+  category       MenuCategory @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  // The number on the printed menu ("65a"). Callers order by it, so it is
+  // what the kitchen sees first. Not unique: the half and quarter duck are
+  // both 22.
+  code           String?
+  name           String
+  description    String?
+  pricePence     Int
+  // Off for "sold out tonight": the receptionist will not sell it.
+  available      Boolean      @default(true)
+  // Other names callers use: "char siu" for roast pork, "special fried rice".
+  aliases        String[]     @default([])
+  sortOrder      Int          @default(0)
+  orderItems     OrderItem[]
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  @@index([organizationId, categoryId, sortOrder])
+  @@map("tc_menu_items")
+}
+
+// ─────────────────────────────────────────────────────────────
+// Orders
+// ─────────────────────────────────────────────────────────────
+
+model Order {
+  id                String       @id @default(cuid())
+  organizationId    String
+  organization      Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  number            Int
+  type              String // collection | delivery
+  status            String       @default("new") // new | preparing | ready | out_for_delivery | completed | cancelled
+  // phone (the receptionist), counter (typed in by staff), lab (a test call)
+  source            String       @default("phone")
+  customerId        String?
+  customer          Customer?    @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  // Copies taken when the order was placed: what the kitchen and driver
+  // need, whatever happens to the customer record afterwards.
+  customerName      String
+  customerPhone     String?
+  addressLine1      String?
+  addressLine2      String?
+  town              String?
+  postcode          String?
+  deliveryNotes     String?
+  // For the kitchen: "no MSG", "extra spicy" across the whole order.
+  notes             String?
+  subtotalPence     Int
+  deliveryFeePence  Int          @default(0)
+  totalPence        Int
+  // The shop is cash only; kept as a column so a card option later is data.
+  paymentMethod     String       @default("cash")
+  // When the customer was told to expect it.
+  promisedAt        DateTime?
+  items             OrderItem[]
+  calls             Call[]
+  completedAt       DateTime?
+  cancelledAt       DateTime?
+  createdAt         DateTime     @default(now())
+  updatedAt         DateTime     @updatedAt
+
+  @@unique([organizationId, number])
+  @@index([organizationId, createdAt])
+  @@index([organizationId, status])
+  @@index([customerId])
+  @@map("tc_orders")
+}
+
+model OrderItem {
+  id             String    @id @default(cuid())
+  orderId        String
+  order          Order     @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  menuItemId     String?
+  menuItem       MenuItem? @relation(fields: [menuItemId], references: [id], onDelete: SetNull)
+  // Copied from the menu when ordered, so a price change tomorrow does not
+  // change what tonight's order cost.
+  code           String?
+  name           String
+  unitPricePence Int
+  quantity       Int
+  // "No onions", "extra spicy".
+  notes          String?
+  sortOrder      Int       @default(0)
+
+  @@index([orderId])
+  @@map("tc_order_items")
+}
+
+// ─────────────────────────────────────────────────────────────
+// Calls and messages
+// ─────────────────────────────────────────────────────────────
+
+model Call {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  phoneNumber    String // E.164, or "Withheld"
+  // What the call came to: any of ordered, order_status, message, enquiry,
+  // hung_up. No recording or transcript is kept.
+  outcomes       String[]     @default([])
+  duration       Int          @default(0)
+  customerId     String?
+  customer       Customer?    @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  orderId        String?
+  order          Order?       @relation(fields: [orderId], references: [id], onDelete: SetNull)
+  createdAt      DateTime     @default(now())
+
+  @@index([organizationId, createdAt])
+  @@map("tc_calls")
+}
+
+// Left by a caller for the shop: a complaint, an allergy question the
+// receptionist will not answer, someone asking for the owner.
+model Message {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  name           String?
+  phone          String?
+  body           String
+  handled        Boolean      @default(false)
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  @@index([organizationId, handled, createdAt])
+  @@map("tc_messages")
+}
