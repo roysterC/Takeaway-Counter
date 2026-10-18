@@ -201,6 +201,9 @@ async function main() {
       stt,
       tts,
       greeting: session.greeting,
+      // No "One moment." while a tool runs: the shop doesn't want it said.
+      // The model's own words before a tool still go out as normal.
+      filler: "",
       out: {
         audio: (chunk) => {
           if (ws.readyState === ws.OPEN) ws.send(chunk, { binary: true });
@@ -328,6 +331,9 @@ async function main() {
       stt,
       tts,
       greeting: session.greeting,
+      // No "One moment." while a tool runs: the shop doesn't want it said.
+      // The model's own words before a tool still go out as normal.
+      filler: "",
       out: {
         audio: (chunk) => {
           if (!audioOut) console.log(`[VOICE] phone call ${start.callSid}: first speech sent`);
