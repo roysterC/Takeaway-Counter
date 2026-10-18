@@ -1,0 +1,208 @@
+# Production deploy for Takeaway Counter.
+#
+# Same box and same shape as call-assistant's deploy (its README, "Deployment"):
+# the netcup VPS, a checkout owned by `deploy`, systemd units, Caddy in front.
+# The two apps share the box, so everything here that could collide with
+# call-assistant has its own value: directory, units, ports, database, hostname.
+# See README.md, "Deployment", for the one-time setup on the box.
+name: Deploy to netcup
+
+on:
+  push:
+    branches: [main]
+  # Manual trigger, so a deploy can be re-run after fixing the box without
+  # having to push an empty commit.
+  workflow_dispatch:
+
+# One production deploy at a time. Two overlapping runs would interleave
+# `npm ci`, `prisma db push` and `systemctl restart` on the same working tree.
+# Queue rather than cancel: a half-finished deploy is worse than a slow one.
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+# Host facts are kept here in plain sight rather than in repository secrets,
+# as in call-assistant: a hostname is not a credential, and a target read from
+# a secret is how that repo once deployed to a retired box for months without
+# anyone noticing. Only the SSH key is secret.
+env:
+  DEPLOY_HOST: v2202609416356518198.megasrv.de # netcup, 89.58.45.110
+  DEPLOY_USER: root
+  APP_USER: deploy # owns APP_DIR and runs the services
+  APP_DIR: /home/deploy/takeaway-counter
+  SERVICE: takeaway-counter.service
+  VOICE_SERVICE: takeaway-counter-voice
+  # call-assistant has 3000 and 4610 on this box.
+  APP_PORT: "3100"
+  VOICE_PORT: "4620"
+  PUBLIC_URL: https://takeaway.89-58-45-110.nip.io
+  # `next build` OOMs on this 3.8GB box under Node's default heap; 3072MB is
+  # what call-assistant found builds reliably. The build also takes a box-wide
+  # lock (/var/lock/netcup-build.lock) so it never runs at the same moment as
+  # another app's build.
+  NODE_HEAP_MB: "3072"
+
+jobs:
+  # Fail fast on the runner, before anything touches production.
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install deps (also generates the Prisma client)
+        run: npm ci
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Lint
+        run: npm run lint
+      - name: Test
+        run: npm test
+      - name: Build
+        run: npm run build
+
+  deploy:
+    needs: checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy to netcup over SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ env.DEPLOY_HOST }}
+          username: ${{ env.DEPLOY_USER }}
+          key: ${{ secrets.NETCUP_SSH_KEY }}
+          script_stop: true
+          # Room for the build (and waiting for another app's build to finish
+          # with the lock) plus up to ten minutes waiting for calls to end
+          # before the voice server is restarted.
+          command_timeout: 40m
+          script: |
+            set -euo pipefail
+
+            APP_DIR='${{ env.APP_DIR }}'
+            APP_USER='${{ env.APP_USER }}'
+            SERVICE='${{ env.SERVICE }}'
+            VOICE_SERVICE='${{ env.VOICE_SERVICE }}'
+            APP_PORT='${{ env.APP_PORT }}'
+            VOICE_PORT='${{ env.VOICE_PORT }}'
+            NODE_HEAP_MB='${{ env.NODE_HEAP_MB }}'
+
+            # Login is root, but the working tree and the services belong to
+            # `deploy`. Everything that touches the tree runs as `deploy`, so
+            # root never leaves files in node_modules/ or .next/ that the next
+            # deploy (or the service itself) cannot overwrite.
+            as_deploy() {
+              sudo -u "$APP_USER" -H bash -lc "cd '$APP_DIR' && $*"
+            }
+
+            echo "==> Deploying to $(hostname) as $APP_USER in $APP_DIR"
+
+            if ! as_deploy 'test -d .git'; then
+              echo "ERROR: $APP_DIR is not a checkout. Do the one-time setup in README.md (\"Deployment\") first." >&2
+              exit 1
+            fi
+            # Prisma (prisma.config.ts) and Next read DATABASE_URL and the rest
+            # from .env.local or .env in the app directory.
+            if ! as_deploy 'test -f .env.local -o -f .env'; then
+              echo "ERROR: neither .env.local nor .env found in $APP_DIR." >&2
+              exit 1
+            fi
+            # Without these the app cannot start or nobody can sign in, and the
+            # health check below would not notice the second.
+            for setting in DATABASE_URL AUTH_SECRET AUTH_URL; do
+              if ! as_deploy "grep -qsE '^${setting}=.+' .env .env.local"; then
+                echo "ERROR: $setting is not set in $APP_DIR/.env." >&2
+                exit 1
+              fi
+            done
+
+            # Git is the source of truth for this box. reset --hard rather than
+            # pull: a merge on a deploy target is never what anyone wants.
+            # Untracked files (.env in particular) are not touched.
+            echo "==> Fetching main"
+            as_deploy 'git fetch origin main && git reset --hard origin/main'
+
+            echo "==> Installing dependencies (and generating the Prisma client)"
+            as_deploy 'npm ci'
+
+            # --- Schema sync -------------------------------------------------
+            # As in call-assistant: inspect the SQL first, apply it only if it
+            # is purely additive, and stop with the SQL printed if it would drop
+            # or narrow anything.
+            echo "==> Checking for schema drift"
+            SCHEMA_SQL="$(as_deploy 'npx prisma migrate diff --from-config-datasource --to-schema=prisma/schema.prisma --script')"
+
+            if printf '%s' "$SCHEMA_SQL" | grep -Eiq 'DROP[[:space:]]+(TABLE|COLUMN|SCHEMA|DATABASE)|SET[[:space:]]+NOT[[:space:]]+NULL|SET[[:space:]]+DATA[[:space:]]+TYPE|TRUNCATE'; then
+              echo "ERROR: refusing to apply a destructive schema change automatically." >&2
+              echo "Pending SQL:" >&2
+              printf '%s\n' "$SCHEMA_SQL" >&2
+              exit 1
+            fi
+
+            echo "==> Syncing schema (additive only)"
+            as_deploy 'npx prisma db push --accept-data-loss'
+
+            # Build before the restart, so the service keeps serving the old
+            # build while this runs and is down only for the restart. One build
+            # at a time on the box: two at once would not fit in its memory.
+            echo "==> Building (heap ${NODE_HEAP_MB}MB)"
+            flock -w 1200 /var/lock/netcup-build.lock \
+              sudo -u "$APP_USER" -H bash -lc "cd '$APP_DIR' && NODE_OPTIONS=--max-old-space-size=${NODE_HEAP_MB} npm run build"
+
+            # The units are copied in on every deploy, so a change to them
+            # ships like any other code.
+            echo "==> Installing units"
+            cp "$APP_DIR/deploy/takeaway-counter.service" "$APP_DIR/deploy/takeaway-counter-voice.service" /etc/systemd/system/
+            systemctl daemon-reload
+            systemctl enable --quiet "$SERVICE" "$VOICE_SERVICE"
+
+            echo "==> Restarting $SERVICE"
+            systemctl restart "$SERVICE"
+            # A unit that exits on boot would otherwise be reported as a green
+            # deploy; so would one that starts but cannot reach its database.
+            healthy=no
+            for _ in $(seq 1 20); do
+              sleep 3
+              if curl -fsS -m 5 "http://127.0.0.1:${APP_PORT}/api/health" >/dev/null 2>&1; then healthy=yes; break; fi
+            done
+            if [ "$healthy" != yes ]; then
+              echo "ERROR: $SERVICE is not answering /api/health on port $APP_PORT." >&2
+              systemctl status "$SERVICE" --no-pager --lines=40 >&2 || true
+              exit 1
+            fi
+
+            # The voice server. A restart hangs up every call in progress, so
+            # it waits for them to finish first: up to ten minutes, checking the
+            # server's own count. Still busy after that, it is left running the
+            # old code and the next deploy restarts it. An unreachable server
+            # counts as no calls, so a crashed one is always restarted. Never
+            # fails the deploy: the CRM is already live by this point.
+            voice_calls() {
+              { curl -fsS -m 5 "http://127.0.0.1:${VOICE_PORT}/voice/health" 2>/dev/null || true; } \
+                | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{let n=0;try{n=JSON.parse(s).activeCalls??0}catch{}console.log(Number(n)||0)})'
+            }
+            waited=0
+            calls=$(voice_calls)
+            while [ "$calls" -gt 0 ] && [ "$waited" -lt 600 ]; do
+              echo "==> $calls call(s) in progress on $VOICE_SERVICE; waiting before restarting it"
+              sleep 15
+              waited=$((waited + 15))
+              calls=$(voice_calls)
+            done
+            if [ "$calls" -gt 0 ]; then
+              echo "WARNING: $VOICE_SERVICE still has $calls call(s) after 10 minutes; left running. The next deploy restarts it." >&2
+            else
+              echo "==> Restarting $VOICE_SERVICE"
+              systemctl restart "$VOICE_SERVICE" || echo "WARNING: $VOICE_SERVICE did not restart" >&2
+            fi
+
+            # Says what is missing for the phone line rather than leaving it to
+            # the first caller. Settings are checked by name only, never shown.
+            for setting in ANTHROPIC_API_KEY RECEPTIONIST_VOICE_SECRET RECEPTIONIST_VOICE_URL DEEPGRAM_API_KEY ELEVENLABS_API_KEY TWILIO_AUTH_TOKEN; do
+              as_deploy "grep -qsE '^${setting}=.+' .env .env.local" \
+                || echo "WARNING: $setting is not set in $APP_DIR/.env; the phone receptionist will not work until it is" >&2
+            done
+
+            echo "==> Deploy complete: ${{ env.PUBLIC_URL }}"

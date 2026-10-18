@@ -78,27 +78,127 @@ npm run typecheck
 npm run lint
 ```
 
-## Going live on the phone
+## Deployment
 
-1. **Accounts.** Get keys from Anthropic, Deepgram and ElevenLabs, and a
-   Twilio account with a UK number.
-2. **Environment.** In `.env` on the server, set `RECEPTIONIST_VOICE_SECRET`
-   (the same value for the CRM and the voice server),
-   `RECEPTIONIST_VOICE_URL=wss://<your host>/voice` and `TWILIO_AUTH_TOKEN`.
-3. **Services.** Run the CRM and the voice server as separate services
-   (`deploy/*.service`), so deploying the CRM never hangs up on a caller.
-4. **Web server.** Route `/voice/` to the voice server with websocket
-   upgrades. For Caddy: `handle /voice/* { reverse_proxy 127.0.0.1:4610 }`.
-   Check it with `curl https://<host>/voice/health`.
-5. **Settings.** Add the Twilio number in **Settings → Twilio number(s)**,
-   and tick "Answer the phone with the receptionist".
-6. **Twilio.** In the console, set the number's voice webhook to
-   `https://<host>/api/twilio/voice` (HTTP POST).
-7. **Test.** Ring the number. The voice server logs `[VOICE] phone call CA…`
-   and the call appears in **Calls & messages**.
+Production runs on the same netcup VPS as call-assistant, deployed the same
+way: a GitHub Action checks the code on GitHub's runner, then SSHes into the
+box, updates the checkout, syncs the schema, builds and restarts the services.
+See `.github/workflows/deploy-netcup.yml`.
+
+| | call-assistant | Takeaway Counter |
+|---|---|---|
+| Box | netcup, `v2202609416356518198.megasrv.de` (89.58.45.110) | same |
+| Checkout | `/home/deploy/call-assistant` | `/home/deploy/takeaway-counter` |
+| CRM | `call-assistant.service`, port 3000 | `takeaway-counter.service`, port 3100 |
+| Voice server | `call-assistant-voice`, port 4610 | `takeaway-counter-voice`, port 4620 |
+| Database | its own | `takeaway_counter`, same Postgres |
+| Public URL | <https://89-58-45-110.nip.io> | <https://takeaway.89-58-45-110.nip.io> |
+
+nip.io answers any name ending in `89-58-45-110.nip.io` with the box's IP,
+so `takeaway.` needs no DNS setup. Caddy gets its own Let's Encrypt
+certificate for it, the same way it did for call-assistant's address.
+
+**How a deploy runs.** Every push to `main` deploys, and so does Actions →
+Deploy to netcup → Run workflow. Deploys are queued, never overlapped.
+
+- Typecheck, lint, tests and a build run first, on GitHub's runner. If any
+  fails, nothing touches the box.
+- Schema changes that only add things are applied automatically. Anything
+  that would drop or narrow data stops the deploy and prints the SQL, as in
+  call-assistant.
+- The build waits on a box-wide lock (`/var/lock/netcup-build.lock`), so it
+  never runs at the same moment as another build that takes the same lock.
+  call-assistant's deploy doesn't take it yet. Wrapping its build line in
+  `flock -w 1200 /var/lock/netcup-build.lock …` stops the two apps building
+  at once and running the box out of memory.
+- The deploy copies in and enables the units from `deploy/` every time.
+- The CRM must answer `/api/health` after its restart, or the deploy fails.
+- The voice server is restarted only once no calls are in progress, waiting
+  up to ten minutes.
+- It warns about any phone-line settings that are missing.
+
+### One-time setup on the box (as root)
+
+1. **Database**, on the Postgres call-assistant already uses:
+
+   ```bash
+   sudo -u postgres createuser takeaway --pwprompt
+   sudo -u postgres createdb -O takeaway takeaway_counter
+   ```
+
+2. **Checkout**, owned by `deploy`. If the repo is private, the box needs a
+   read-only deploy key for *this* repo. GitHub won't accept the same key on
+   two repos, so call-assistant's can't be reused.
+
+   ```bash
+   sudo -u deploy ssh-keygen -t ed25519 -N "" -f /home/deploy/.ssh/takeaway_counter
+   cat /home/deploy/.ssh/takeaway_counter.pub   # add in GitHub: repo Settings → Deploy keys (read-only)
+   sudo -u deploy tee -a /home/deploy/.ssh/config <<'CFG'
+   Host github-takeaway
+     HostName github.com
+     IdentityFile ~/.ssh/takeaway_counter
+     IdentitiesOnly yes
+   CFG
+   sudo -u deploy git clone git@github-takeaway:roysterC/Takeaway-Counter.git /home/deploy/takeaway-counter
+   ```
+
+3. **Settings**, in `/home/deploy/takeaway-counter/.env` (owned by
+   `deploy`). Start from `.env.example`. The deploy refuses to run without
+   the first three:
+
+   ```bash
+   DATABASE_URL=postgresql://takeaway:<password>@localhost:5432/takeaway_counter
+   AUTH_SECRET=<openssl rand -base64 32>
+   AUTH_URL=https://takeaway.89-58-45-110.nip.io
+   AUTH_TRUST_HOST=true
+   ANTHROPIC_API_KEY=...
+   RECEPTIONIST_VOICE_SECRET=<openssl rand -hex 32>
+   RECEPTIONIST_VOICE_URL=wss://takeaway.89-58-45-110.nip.io/voice
+   DEEPGRAM_API_KEY=...
+   ELEVENLABS_API_KEY=...
+   TWILIO_AUTH_TOKEN=...
+   ```
+
+4. **Tables, menu and owner login.** Run this once on the box rather than in
+   the Action, because the seed prints the owner's password and GitHub
+   keeps workflow logs:
+
+   ```bash
+   sudo -u deploy -H bash -lc 'cd /home/deploy/takeaway-counter && npm ci && npx prisma db push && npm run seed'
+   ```
+
+5. **Caddy.** Add a site to `/etc/caddy/Caddyfile`, then run
+   `systemctl reload caddy`. Websockets for the voice server need nothing
+   extra in Caddy.
+
+   ```caddy
+   takeaway.89-58-45-110.nip.io {
+   	handle /voice/* {
+   		reverse_proxy 127.0.0.1:4620
+   	}
+   	reverse_proxy 127.0.0.1:3100
+   }
+   ```
+
+6. **GitHub secret.** In this repo, add `NETCUP_SSH_KEY`. It's the same key
+   call-assistant uses (the private half of `~/.ssh/netcup-ca`, whole file).
+   Secrets on a personal account aren't shared between repos.
+
+7. **First deploy.** Push to `main`, or Actions → Deploy to netcup → Run
+   workflow. Then check `https://takeaway.89-58-45-110.nip.io/api/health`
+   and `https://takeaway.89-58-45-110.nip.io/voice/health`.
+
+### Putting the receptionist on the phone
+
+1. Buy a UK number in Twilio. In the console, set its voice webhook to
+   `https://takeaway.89-58-45-110.nip.io/api/twilio/voice` (HTTP POST).
+2. In the CRM, add the number under **Settings → Twilio number(s)** and
+   tick "Answer the phone with the receptionist".
+3. Ring it. `journalctl -u takeaway-counter-voice -f` shows
+   `[VOICE] phone call CA…`, and the call appears in **Calls & messages**.
 
 The shop's existing number (01889 270870) can forward to the Twilio number,
-so customers keep dialling the number on the leaflet.
+or be ported into Twilio so the leaflet number *is* the receptionist's line.
 
 ## Still to decide with the shop
 

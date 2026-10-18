@@ -1,6 +1,5 @@
-# The CRM (Next.js). Install once, as root:
-#   cp deploy/takeaway-counter.service /etc/systemd/system/
-#   systemctl daemon-reload && systemctl enable --now takeaway-counter
+# The CRM (Next.js). The deploy workflow copies this in and enables it on
+# every deploy. Port 3100: call-assistant has 3000 on the same box.
 [Unit]
 Description=Takeaway Counter CRM
 After=network.target postgresql.service
@@ -10,7 +9,7 @@ User=deploy
 WorkingDirectory=/home/deploy/takeaway-counter
 Environment=NODE_ENV=production
 Environment=PORT=3100
-ExecStart=/usr/bin/npm start -- -p 3100
+ExecStart=/usr/bin/npm start -- -p 3100 -H 127.0.0.1
 Restart=always
 RestartSec=3
 
