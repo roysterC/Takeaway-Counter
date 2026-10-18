@@ -18,9 +18,23 @@ export function apiFetch(
     return fetch(input, init);
   }
   return fetch(withAsOrg(input), init).then((res) => {
-    if (res.status === 401) toLogin();
+    if (res.status === 401 && Date.now() >= holdUntil) toLogin();
     return res;
   });
+}
+
+let holdUntil = 0;
+
+/**
+ * Don't send the page to /login on a 401 for the next `ms` (0 ends the hold).
+ *
+ * Changing your password raises the session version before this tab has its
+ * new cookie, so a poll that goes out in between is refused with the old one.
+ * That refusal is expected, not a sign the session has gone, and must not
+ * throw the person out mid-change.
+ */
+export function holdLoginRedirect(ms: number): void {
+  holdUntil = Date.now() + ms;
 }
 
 function withAsOrg(input: string): string {

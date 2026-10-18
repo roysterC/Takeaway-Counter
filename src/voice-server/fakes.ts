@@ -5,7 +5,7 @@
  * Enabled only by VOICE_FAKES=1 outside production. The recogniser is driven
  * by text the lab page sends ("pretend I said…"), the voice is a tone whose
  * length follows the text, and the model echoes what it heard and adds a dish
- * when asked for chow mein, so the tool-filler path runs too.
+ * when asked for chow mein, so a turn with a tool call runs too.
  */
 
 import type Anthropic from "@anthropic-ai/sdk";
@@ -85,7 +85,7 @@ export function fakeModel(): StreamingClient {
         const last = params.messages[params.messages.length - 1];
         const said = typeof last.content === "string" ? last.content : null;
         // "Chow mein" from the caller: look it up on the menu, so the
-        // tool-filler path runs as it would on a real order.
+        // tool path runs as it would on a real order.
         const toolTurn = said !== null && /chow mein/i.test(said);
         // "Bye" from the caller: say goodbye and hang up, as the real one should.
         const hangUp = said !== null && /\b(bye|goodbye)\b/i.test(said);

@@ -1,5 +1,7 @@
 import bcrypt from "bcryptjs";
 
+export { passwordChangeProblem, validatePassword } from "@/lib/password-rules";
+
 const ROUNDS = 10;
 
 export async function hashPassword(plain: string): Promise<string> {
@@ -11,11 +13,4 @@ export async function verifyPassword(
   hash: string
 ): Promise<boolean> {
   return bcrypt.compare(plain, hash);
-}
-
-export function validatePassword(plain: string): string | null {
-  if (!plain || plain.length < 8) {
-    return "Password must be at least 8 characters";
-  }
-  return null;
 }

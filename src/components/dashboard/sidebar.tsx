@@ -1,11 +1,13 @@
 "use client";
 
 import Link from "next/link";
+import { useState } from "react";
 import { usePathname, useSearchParams } from "next/navigation";
 import { signOut, useSession } from "next-auth/react";
 import {
   ClipboardList,
   FlaskConical,
+  KeyRound,
   LogOut,
   PanelLeftClose,
   PanelLeftOpen,
@@ -17,6 +19,7 @@ import {
 import { cn } from "@/lib/utils";
 import { useMe } from "@/components/providers/me-provider";
 import { NAV_PAGES } from "@/lib/navigation";
+import { ChangePasswordDialog } from "./change-password-dialog";
 
 /** Each page's icon; the pages themselves are in src/lib/navigation.ts. */
 const ICONS: Record<string, typeof ClipboardList> = {
@@ -64,6 +67,7 @@ export function Sidebar({
   // Nothing owner-only is shown until the role has loaded from the database.
   const isOwner = me?.role === "admin" || me?.role === "superAdmin";
   const pages = NAV_PAGES.filter((p) => !p.ownerOnly || isOwner);
+  const [changingPassword, setChangingPassword] = useState(false);
 
   return (
     <aside
@@ -113,7 +117,24 @@ export function Sidebar({
         </div>
         <button
           type="button"
+          onClick={() => {
+            // On a phone, out of the drawer first so the dialog isn't behind it.
+            onNavigate?.();
+            setChangingPassword(true);
+          }}
+          title={collapsed ? "Change password" : undefined}
+          className={cn(
+            "flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm text-sidebar-foreground/80 hover:bg-white/10 hover:text-sidebar-foreground",
+            collapsed && "md:justify-center md:px-0"
+          )}
+        >
+          <KeyRound className="h-4 w-4 shrink-0" />
+          <span className={wide}>Change password</span>
+        </button>
+        <button
+          type="button"
           onClick={() => signOut({ callbackUrl: "/login" })}
+          title={collapsed ? "Sign out" : undefined}
           className={cn(
             "flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm text-sidebar-foreground/80 hover:bg-white/10 hover:text-sidebar-foreground",
             collapsed && "md:justify-center md:px-0"
@@ -137,6 +158,7 @@ export function Sidebar({
           </button>
         )}
       </div>
+      <ChangePasswordDialog open={changingPassword} onClose={() => setChangingPassword(false)} />
     </aside>
   );
 }
