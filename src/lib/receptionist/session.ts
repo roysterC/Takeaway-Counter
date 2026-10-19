@@ -14,6 +14,7 @@ import { getMenu, getShopConfig } from "@/lib/shop";
 import { openStatus, spokenNextOpen, spokenTime, zonedNow } from "@/lib/hours";
 import { amendOrder, placeOrder, recentOrdersFor, spokenStatus } from "@/lib/orders";
 import { formatPence } from "@/lib/money";
+import { lookupPostcode } from "@/lib/address-lookup";
 import { END_CALL_TOOL, ReceptionistEngine, type StreamingClient } from "./engine";
 import { ORDER_TOOLS, orderTools } from "./order-tools";
 import { buildSystem, greetingFor } from "./prompt";
@@ -121,6 +122,7 @@ export async function startReceptionist(
       const fresh = await getShopConfig(organizationId);
       return { collection: fresh.collectionMinutes, delivery: fresh.deliveryMinutes };
     },
+    findAddresses: (postcode) => lookupPostcode(postcode, { apiKey: process.env.IDEAL_POSTCODES_API_KEY }),
     placeOrder: (input) => placeOrder(organizationId, { ...input, source }, { ignoreHours }),
     amendOrder: (orderId, input) => amendOrder(organizationId, orderId, { ...input, source }),
     recentOrders: async (phone) => {

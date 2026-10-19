@@ -213,7 +213,7 @@ export class OrderDraft {
   readBack(readyInMinutes: number): string {
     const how =
       this.type === "delivery"
-        ? `for delivery to ${[this.customer.addressLine1, this.customer.postcode].filter(Boolean).join(", ")}`
+        ? `for delivery to ${[this.customer.addressLine1, this.customer.addressLine2, this.customer.postcode].filter(Boolean).join(", ")}`
         : "for collection";
     const money =
       this.type === "delivery" && this.deliveryFeePence > 0

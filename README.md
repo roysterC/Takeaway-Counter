@@ -8,8 +8,10 @@ Two parts:
 
 1. **The phone receptionist.** It answers *"Hello, it's Hixon Chinese
    Takeaway. Is it for collection or delivery?"*, confirms the caller's name
-   (and address, for delivery), and takes the order from the real menu,
-   confirming each dish with just the quantity and name ("One Chicken Chow
+   (and address, for delivery), and takes the order from the real menu.
+   A new delivery customer is only asked for their postcode and house
+   number: the address is looked up (Ideal Postcodes, `IDEAL_POSTCODES_API_KEY`).
+   It confirms each dish with just the quantity and name ("One Chicken Chow
    Mein."). When the caller says that's everything, it checks the order for
    rice, chips or noodles and, if there are none, asks "Would you like any
    rice or chips with that?" once. Then it sends the order to the
