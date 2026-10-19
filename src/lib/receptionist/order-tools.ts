@@ -17,7 +17,7 @@ import { OrderDraft, type OrderType } from "@/lib/order-draft";
 import { normalisePostcode, quoteDelivery, type DeliveryRules } from "@/lib/delivery";
 import { formatPence, spokenPrice } from "@/lib/money";
 import { normalisePhone, speakablePhone } from "@/lib/phone";
-import type { PlaceOrderInput, PlaceOrderResult } from "@/lib/orders";
+import type { CheckOrderResult, PlaceOrderInput, PlaceOrderResult } from "@/lib/orders";
 import { matchAddress, nearestNames, type FoundAddress, type LookupResult } from "@/lib/address-lookup";
 
 export const ORDER_TOOLS: Anthropic.Tool[] = [
@@ -110,7 +110,7 @@ export const ORDER_TOOLS: Anthropic.Tool[] = [
     name: "change_item",
     description:
       "Change or remove a line already on the order, by its line number from the latest order summary. " +
-      "Quantity 0 removes it. Fine after the order has been placed too: then confirm_order and place_order again.",
+      "Quantity 0 removes it. Fine after the caller has agreed the order too: then confirm_order and agree_order again.",
     input_schema: {
       type: "object",
       properties: {
@@ -144,12 +144,12 @@ export const ORDER_TOOLS: Anthropic.Tool[] = [
     input_schema: { type: "object", properties: {} },
   },
   {
-    name: "place_order",
+    name: "agree_order",
     description:
-      "Send the order to the kitchen, once the caller has said yes to confirm_order's question. Never in the " +
-      "same reply as the question. On success, say the result's \"say\" (the price and how long) and wait: do " +
-      "not say goodbye yet. A change after it has been placed goes through confirm_order and place_order " +
-      "again, which updates the order already sent.",
+      "The caller has said yes to confirm_order's question. Never in the same reply as the question. Checks " +
+      "the order can be made and gives the price and how long; say the result's \"say\" and wait: do not say " +
+      "goodbye yet. The order goes to the kitchen when the call ends. If they change something after this, " +
+      "make the change, then confirm_order and agree_order again.",
     input_schema: { type: "object", properties: {} },
   },
   {
@@ -198,13 +198,14 @@ export interface OrderToolDeps {
   orderingRefusal: () => Promise<string | null>;
   /** Current wait times, read fresh so a change on the board applies at once. */
   waitMinutes: () => Promise<{ collection: number; delivery: number }>;
-  /** How many times the caller has spoken: see OrderDraft.placeRefusal. */
+  /** How many times the caller has spoken: see OrderDraft.agreeRefusal. */
   turn: () => number;
   /** Every address at a postcode: see src/lib/address-lookup.ts. */
   findAddresses: (postcode: string) => Promise<LookupResult>;
+  /** Everything placing would check, without placing: when the caller says yes. */
+  checkOrder: (input: PlaceOrderInput) => Promise<CheckOrderResult>;
+  /** Send the order to the kitchen: when the call ends. */
   placeOrder: (input: PlaceOrderInput) => Promise<PlaceOrderResult>;
-  /** Correct the order placed earlier on this call, while the kitchen hasn't started it. */
-  amendOrder: (orderId: string, input: PlaceOrderInput) => Promise<PlaceOrderResult>;
   recentOrders: (phone: string) => Promise<
     Array<{ number: number; type: string; status: string; promisedAt: Date | null; spokenStatus: string; spokenTime: string | null }>
   >;
@@ -227,6 +228,9 @@ export function orderTools(deps: OrderToolDeps) {
   let messagePhone: string | null = deps.callerNumber;
   // The addresses at the postcode the caller gave, for choose_address.
   let found: FoundAddress[] = [];
+  // What the caller said yes to, sent to the kitchen when the call ends.
+  let agreedInput: PlaceOrderInput | null = null;
+  let finishing = false;
 
   const s = (v: unknown) => (typeof v === "string" ? v : undefined);
 
@@ -250,7 +254,7 @@ export function orderTools(deps: OrderToolDeps) {
               }
             : {}),
           order: draft.summary(),
-          ...afterPlacing(),
+          ...afterAgreeing(),
         };
       }
 
@@ -292,7 +296,7 @@ export function orderTools(deps: OrderToolDeps) {
           result.deliveryCharge = q.feePence ? spokenPrice(q.feePence) : "free";
           result.deliveryArea = q.zone;
         }
-        return { ...result, ...afterPlacing() };
+        return { ...result, ...afterAgreeing() };
       }
 
       case "find_address": {
@@ -366,7 +370,7 @@ export function orderTools(deps: OrderToolDeps) {
           ok: true,
           address: spokenAddress(match.address),
           then: "Say the address back in a few words, then carry on.",
-          ...afterPlacing(),
+          ...afterAgreeing(),
         };
       }
 
@@ -412,7 +416,7 @@ export function orderTools(deps: OrderToolDeps) {
           // All the caller needs to hear back: the quantity and the dish, no price.
           ...(added.length ? { say: sentence(OrderDraft.spokenDishes(added)) } : {}),
           order: draft.summary(),
-          ...afterPlacing(),
+          ...afterAgreeing(),
         };
       }
 
@@ -424,12 +428,12 @@ export function orderTools(deps: OrderToolDeps) {
           notes: input.notes === undefined ? undefined : (s(input.notes) ?? null),
         });
         if (draft.type === "delivery" && draft.customer.postcode) requote();
-        return { ok: true, order: draft.summary(), ...afterPlacing() };
+        return { ok: true, order: draft.summary(), ...afterAgreeing() };
       }
 
       case "set_order_notes": {
         draft.setNotes(s(input.notes) ?? null);
-        return { ok: true, notes: draft.notes, ...afterPlacing() };
+        return { ok: true, notes: draft.notes, ...afterAgreeing() };
       }
 
       case "review_order": {
@@ -442,15 +446,13 @@ export function orderTools(deps: OrderToolDeps) {
       }
 
       case "confirm_order": {
-        // Placed and unchanged since: nothing to check again.
-        if (draft.placed && !draft.needsSaving) {
-          return { confirmed: true, then: "The order is already with the kitchen, unchanged. Carry on." };
-        }
+        // Agreed and unchanged since: nothing to check again.
+        if (draft.agreed) return { ready: true, alreadyAgreed: true, then: "They have already agreed the order as it stands. Carry on." };
         const missing = draft.missing();
         if (missing.length) return { ready: false, askFor: missing, then: "Ask for these, then use confirm_order again." };
         // Nothing to eat it with: offer rice or chips, once, now the caller
-        // has finished ordering. Not when changing an order already sent.
-        if (!draft.placed && !draft.hasStaple && !draft.carbsOffered) {
+        // has finished ordering. Not when changing an order already agreed.
+        if (!draft.everAgreed && !draft.hasStaple && !draft.carbsOffered) {
           draft.carbsOffered = true;
           return {
             ready: false,
@@ -475,48 +477,24 @@ export function orderTools(deps: OrderToolDeps) {
         return {
           ready: true,
           say: draft.confirmationQuestion(),
-          then: "Say this exactly and wait. If they say yes, use place_order. If not, ask what to change, change it, and use confirm_order again.",
+          then: "Say this exactly and wait. If they say yes, use agree_order. If not, ask what to change, change it, and use confirm_order again.",
         };
       }
 
-      case "place_order": {
-        if (draft.placed && !draft.needsSaving) {
-          return { success: true, orderNumber: draft.placed.number, then: "Already with the kitchen, unchanged. Carry on." };
-        }
-        const refusal = draft.placeRefusal(deps.turn());
-        if (refusal) return { success: false, error: refusal };
-        const input: PlaceOrderInput = {
-          type: draft.type!,
-          source: "phone",
-          customer: {
-            name: draft.customer.name!,
-            phone: draft.customer.phone,
-            addressLine1: draft.customer.addressLine1,
-            addressLine2: draft.customer.addressLine2,
-            town: draft.customer.town,
-            postcode: draft.customer.postcode,
-            deliveryNotes: draft.customer.deliveryNotes,
-          },
-          lines: draft.lines.map((l) => ({ menuItemId: l.item.id, quantity: l.quantity, notes: l.notes })),
-          notes: draft.notes,
-        };
-        const result = draft.placed ? await deps.amendOrder(draft.placed.orderId, input) : await deps.placeOrder(input);
-        if (!result.ok) {
-          return {
-            success: false,
-            error: result.message,
-            then: draft.placed
-              ? "Tell the caller plainly, and take a message so the staff can sort out the change."
-              : "Tell the caller plainly; do not say the order is in.",
-          };
-        }
-        draft.markPlaced(result.order.id, result.order.number);
+      case "agree_order": {
+        if (draft.agreed) return { agreed: true, then: "Already agreed as it stands. Carry on." };
+        const refusal = draft.agreeRefusal(deps.turn());
+        if (refusal) return { agreed: false, error: refusal };
+        const input = orderInput();
+        const check = await deps.checkOrder(input);
+        if (!check.ok) return { agreed: false, error: check.message, then: "Tell the caller plainly; the order can't go through as it is." };
+        draft.markAgreed();
+        agreedInput = input;
         return {
-          success: true,
-          orderNumber: result.order.number,
-          total: formatPence(result.order.totalPence),
-          say: draft.priceAndTime(result.order.readyInMinutes),
-          then: `Say this exactly, then wait for them. When they say goodbye, thanks or that's all, say "${GOODBYE}" and end the call with end_call in the same reply. If they ask something, answer it.`,
+          agreed: true,
+          total: formatPence(check.totalPence),
+          say: draft.priceAndTime(check.readyInMinutes),
+          then: `Say this exactly, then wait for them. The order goes to the kitchen when the call ends. When they say goodbye, thanks or that's all, say "${GOODBYE}" and end the call with end_call in the same reply. If they ask something, answer it.`,
         };
       }
 
@@ -582,12 +560,68 @@ export function orderTools(deps: OrderToolDeps) {
     };
   }
 
-  /** A change after the order went to the kitchen: say so, so the model sends the update. */
-  function afterPlacing() {
-    return draft.needsSaving
-      ? { note: "The order has already gone to the kitchen. When the caller has finished changing it, use confirm_order, then place_order once they say yes, to update it." }
+  /** A change after the caller agreed the order: say so, so it is agreed again. */
+  function afterAgreeing() {
+    return draft.everAgreed && !draft.agreed
+      ? { note: "The order has changed since they agreed it. When they have finished changing it, read it back with confirm_order and wait for yes." }
       : {};
   }
 
-  return { draft, execute };
+  /** The order as it stands, in the shape placing takes. */
+  function orderInput(): PlaceOrderInput {
+    return {
+      type: draft.type!,
+      source: "phone",
+      customer: {
+        name: draft.customer.name!,
+        phone: draft.customer.phone,
+        addressLine1: draft.customer.addressLine1,
+        addressLine2: draft.customer.addressLine2,
+        town: draft.customer.town,
+        postcode: draft.customer.postcode,
+        deliveryNotes: draft.customer.deliveryNotes,
+      },
+      lines: draft.lines.map((l) => ({ menuItemId: l.item.id, quantity: l.quantity, notes: l.notes })),
+      notes: draft.notes,
+    };
+  }
+
+  /**
+   * The call has ended: send the order the caller agreed to the kitchen.
+   * Once only, and only an agreed order. If they changed it after agreeing
+   * and hung up before agreeing again, the agreed version goes and the staff
+   * get a message about the change. If it can't be placed at all (a dish
+   * sold out in the last minute), the staff get a message to ring them back,
+   * since the caller is no longer there to be told.
+   */
+  async function finish(): Promise<{ orderId: string; number: number } | null> {
+    if (!agreedInput || draft.placed || finishing) return draft.placed;
+    finishing = true;
+    const input = agreedInput;
+    const who = [input.customer.name, input.customer.phone ? speakablePhone(input.customer.phone) : null].filter(Boolean).join(", ");
+    const result = await deps.placeOrder(input);
+    if (!result.ok) {
+      await deps.saveMessage({
+        id: null,
+        name: input.customer.name,
+        phone: input.customer.phone ?? null,
+        body: `Phone order couldn't be sent to the kitchen after the call: ${result.message} They were expecting: ${OrderDraft.spokenDishes(
+          draft.lines.map((l) => ({ quantity: l.quantity, name: l.item.name, notes: l.notes }))
+        )} (${input.type}). Please ring ${who} back.`,
+      });
+      return null;
+    }
+    draft.placed = { orderId: result.order.id, number: result.order.number };
+    if (!draft.agreed) {
+      await deps.saveMessage({
+        id: null,
+        name: input.customer.name,
+        phone: input.customer.phone ?? null,
+        body: `Order #${result.order.number}: the caller started changing it after agreeing, and the call ended before they agreed the change. The order went through as first agreed; please check with ${who}.`,
+      });
+    }
+    return draft.placed;
+  }
+
+  return { draft, execute, finish };
 }

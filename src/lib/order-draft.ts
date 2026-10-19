@@ -1,21 +1,21 @@
 /**
  * The order being taken on one call: collection or delivery, who it is for,
- * and what is in it. Held in memory for the length of the call and written to
- * the database once the caller has heard it read back and said it's right.
+ * and what is in it. Held in memory for the whole call. The caller agrees it
+ * when it is read back ("..., is that correct?" "Yes"), and it is sent to
+ * the kitchen when the call ends, so anything they change before hanging up
+ * is simply part of the order.
  *
- * That rule is enforced here, not left to the prompt. A model told "read the
- * order back before placing it" will usually do so, and now and then will
- * place it in the same breath. So:
+ * The agreement rule is enforced here, not left to the prompt. A model told
+ * "read the order back and wait for a yes" will usually do so, and now and
+ * then will take the yes as given. So:
  *
  * - every change to the order bumps `version`;
  * - confirm_order records the version it read back and the caller turn it
  *   was in;
- * - placing is refused unless the order is unchanged since that read-back
- *   AND the caller has spoken since (their "yes").
- *
- * A change after the order has gone to the kitchen ("oh, and some chips")
- * goes through the same read-back, then updates the order already placed
- * instead of making a second one.
+ * - agreeing is refused unless the order is unchanged since that read-back
+ *   AND the caller has spoken since (their "yes");
+ * - a change after agreeing undoes the agreement until it is read back and
+ *   agreed again.
  */
 
 import type { MenuEntry } from "@/lib/menu";
@@ -59,9 +59,10 @@ export class OrderDraft {
   deliveryFeePence = 0;
 
   version = 0;
+  /** Sent to the kitchen, once the call has ended. */
   placed: { orderId: string; number: number } | null = null;
-  /** The version that went to the kitchen. */
-  private placedVersion: number | null = null;
+  /** The version the caller said yes to. */
+  private agreedVersion: number | null = null;
   /** "Would you like any rice or chips?" has been asked: once a call is enough. */
   carbsOffered = false;
   /** The version read back with "is that correct?", and the caller turn it was asked in. */
@@ -191,15 +192,19 @@ export class OrderDraft {
     return this.lines.some((l) => l.item.staple);
   }
 
-  /** The order, as it stands, has gone to the kitchen as `number`. */
-  markPlaced(orderId: string, number: number) {
-    this.placed = { orderId, number };
-    this.placedVersion = this.version;
+  /** The caller has said yes to the order as it stands. */
+  markAgreed() {
+    this.agreedVersion = this.version;
   }
 
-  /** Placed, and changed since: the kitchen's copy is out of date. */
-  get needsSaving(): boolean {
-    return this.placed !== null && this.placedVersion !== this.version;
+  /** Agreed, and unchanged since. */
+  get agreed(): boolean {
+    return this.agreedVersion !== null && this.agreedVersion === this.version;
+  }
+
+  /** Agreed at some point on this call, whether or not it has changed since. */
+  get everAgreed(): boolean {
+    return this.agreedVersion !== null;
   }
 
   /**
@@ -228,19 +233,19 @@ export class OrderDraft {
     this.confirmation = { version: this.version, turn };
   }
 
-  /** Why the order can't be placed yet, or null when it can. */
-  placeRefusal(turn: number): string | null {
+  /** Why the caller can't be taken to have agreed the order yet, or null when they can. */
+  agreeRefusal(turn: number): string | null {
     if (!this.confirmation || this.confirmation.version !== this.version) {
-      return "Not placed: the order hasn't been read back as it now stands. Use confirm_order, ask if it's correct, and wait for them to say yes.";
+      return "Not agreed: the order hasn't been read back as it now stands. Use confirm_order, ask if it's correct, and wait for them to say yes.";
     }
     if (turn <= this.confirmation.turn) {
-      return "Not placed: wait for the caller to say the order is correct before placing it.";
+      return "Not agreed: wait for the caller to say the order is correct.";
     }
     return null;
   }
 
   /**
-   * Said once the order has gone to the kitchen: the money and how long.
+   * Said once the caller has agreed the order: the money and how long.
    * Prices in words, so the voice never says "pound sign". No goodbye: the
    * caller may have something more to say.
    */

@@ -26,14 +26,25 @@ const MAX_ENTRIES = 50;
 const g = globalThis as unknown as { __receptionistLab?: Map<string, LabEntry> };
 const store: Map<string, LabEntry> = (g.__receptionistLab ??= new Map());
 
+/**
+ * A lab call is over, however it ended: hung up, the receptionist said
+ * goodbye, or left idle. An order the caller agreed goes to the board then,
+ * as a phone order does when the line goes down.
+ */
+function drop(id: string) {
+  const e = store.get(id);
+  store.delete(id);
+  return e ? e.session.finish() : Promise.resolve(null);
+}
+
 function sweep(now: number) {
   for (const [id, e] of store) {
-    if (now - e.lastUsed > IDLE_MS) store.delete(id);
+    if (now - e.lastUsed > IDLE_MS) void drop(id).catch(() => {});
   }
   // Oldest first, if someone opens far more than anyone needs.
   while (store.size >= MAX_ENTRIES) {
     const oldest = [...store.entries()].sort((a, b) => a[1].lastUsed - b[1].lastUsed)[0];
-    store.delete(oldest[0]);
+    void drop(oldest[0]).catch(() => {});
   }
 }
 
@@ -54,13 +65,14 @@ export function getLabSession(id: string, organizationId: string, userId: string
   const e = store.get(id);
   if (!e || e.organizationId !== organizationId || e.userId !== userId) return null;
   if (Date.now() - e.lastUsed > IDLE_MS) {
-    store.delete(id);
+    void drop(id).catch(() => {});
     return null;
   }
   e.lastUsed = Date.now();
   return e;
 }
 
+/** End a lab call; resolves to the order it sent to the board, if any. */
 export function endLabSession(id: string) {
-  store.delete(id);
+  return drop(id);
 }

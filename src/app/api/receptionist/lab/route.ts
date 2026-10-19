@@ -88,7 +88,8 @@ export async function POST(req: NextRequest) {
         if (firstTextMs === null) firstTextMs = Date.now() - started;
       },
     });
-    if (turn.endCall) endLabSession(body.sessionId);
+    // The receptionist hung up: the agreed order goes to the board now.
+    const placed = turn.endCall ? await endLabSession(body.sessionId) : entry.session.draft.placed;
     return NextResponse.json({
       reply: turn.text,
       tools: turn.tools,
@@ -97,7 +98,8 @@ export async function POST(req: NextRequest) {
       ended: turn.endCall,
       usage: turn.usage,
       order: entry.session.draft.summary(),
-      placed: entry.session.draft.placed,
+      agreed: entry.session.draft.agreed,
+      placed,
       // How long until the first word, which is what a caller feels, and
       // until the whole reply.
       firstTextMs,
@@ -123,6 +125,7 @@ export async function DELETE(req: NextRequest) {
   const ctx = await requireTenant(req);
   if (isErrorResponse(ctx)) return ctx;
   const id = req.nextUrl.searchParams.get("sessionId");
-  if (id && getLabSession(id, ctx.organizationId, ctx.userId)) endLabSession(id);
-  return NextResponse.json({ ok: true });
+  // Hanging up ends the call, so an agreed order goes to the board.
+  const placed = id && getLabSession(id, ctx.organizationId, ctx.userId) ? await endLabSession(id) : null;
+  return NextResponse.json({ ok: true, placed });
 }

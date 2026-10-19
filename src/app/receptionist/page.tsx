@@ -44,7 +44,7 @@ const TOOL_LABEL: Record<string, string> = {
   set_order_notes: "Note for the kitchen",
   review_order: "Looked at the order so far",
   confirm_order: "Read the order back to check",
-  place_order: "Sent the order to the kitchen",
+  agree_order: "The caller agreed the order",
   check_order_status: "Looked up an order",
   take_message: "Took a message",
 };
@@ -58,6 +58,7 @@ export default function ReceptionistLabPage() {
   const [lines, setLines] = useState<Line[]>([]);
   const [order, setOrder] = useState<Summary | null>(null);
   const [placed, setPlaced] = useState<number | null>(null);
+  const [agreed, setAgreed] = useState(false);
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -83,6 +84,7 @@ export default function ReceptionistLabPage() {
       setModel(data.model);
       setOrder(null);
       setPlaced(null);
+      setAgreed(false);
       setLines([
         { kind: "note", text: data.callerNumber ? `Call from ${data.callerNumber}` : "Call from a withheld number" },
         { kind: "assistant", text: data.greeting },
@@ -96,7 +98,11 @@ export default function ReceptionistLabPage() {
   };
 
   const hangUp = async () => {
-    if (sessionId) await apiFetch(`/api/receptionist/lab?sessionId=${encodeURIComponent(sessionId)}`, { method: "DELETE" }).catch(() => {});
+    if (sessionId) {
+      const res = await apiFetch(`/api/receptionist/lab?sessionId=${encodeURIComponent(sessionId)}`, { method: "DELETE" }).catch(() => null);
+      const data = await res?.json().catch(() => null);
+      if (data?.placed) setPlaced(data.placed.number);
+    }
     setSessionId(null);
     setLines((ls) => [...ls, { kind: "note", text: "Call ended" }]);
   };
@@ -121,6 +127,7 @@ export default function ReceptionistLabPage() {
         return;
       }
       setOrder(data.order);
+      setAgreed(Boolean(data.agreed));
       if (data.placed) setPlaced(data.placed.number);
       setLines((ls) => [
         ...ls,
@@ -293,7 +300,11 @@ export default function ReceptionistLabPage() {
                     </div>
                   </>
                 )}
-                {placed && <p className="rounded-md bg-emerald-50 px-2 py-1.5 text-xs font-medium text-emerald-800">Placed as order #{placed}</p>}
+                {placed ? (
+                  <p className="rounded-md bg-emerald-50 px-2 py-1.5 text-xs font-medium text-emerald-800">Sent to the kitchen as order #{placed}</p>
+                ) : agreed ? (
+                  <p className="rounded-md bg-amber-50 px-2 py-1.5 text-xs font-medium text-amber-900">Agreed: goes to the kitchen when the call ends</p>
+                ) : null}
               </CardContent>
             </Card>
 

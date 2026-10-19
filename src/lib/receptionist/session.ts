@@ -12,7 +12,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { prisma } from "@/lib/prisma";
 import { getMenu, getShopConfig } from "@/lib/shop";
 import { openStatus, spokenNextOpen, spokenTime, zonedNow } from "@/lib/hours";
-import { amendOrder, placeOrder, recentOrdersFor, spokenStatus } from "@/lib/orders";
+import { checkOrder, placeOrder, recentOrdersFor, spokenStatus } from "@/lib/orders";
 import { formatPence } from "@/lib/money";
 import { lookupPostcode } from "@/lib/address-lookup";
 import { END_CALL_TOOL, ReceptionistEngine, type StreamingClient } from "./engine";
@@ -60,6 +60,11 @@ export interface ReceptionistSession {
   keyterms: string[];
   /** The order taken on this call; `placed` once it has gone to the kitchen. */
   draft: OrderDraft;
+  /**
+   * The call has ended: send the order the caller agreed to the kitchen.
+   * Safe to call more than once; null when there was nothing to send.
+   */
+  finish: () => Promise<{ orderId: string; number: number } | null>;
 }
 
 /**
@@ -124,8 +129,10 @@ export async function startReceptionist(
     },
     turn: () => engine.turns,
     findAddresses: (postcode) => lookupPostcode(postcode, { apiKey: process.env.IDEAL_POSTCODES_API_KEY }),
-    placeOrder: (input) => placeOrder(organizationId, { ...input, source }, { ignoreHours }),
-    amendOrder: (orderId, input) => amendOrder(organizationId, orderId, { ...input, source }),
+    checkOrder: (input) => checkOrder(organizationId, { ...input, source }, { ignoreHours }),
+    // At the end of the call. The hours and the pause switch were checked
+    // when the caller agreed it: an order agreed at 9:29 still goes at 9:31.
+    placeOrder: (input) => placeOrder(organizationId, { ...input, source }, { ignoreHours: true }),
     recentOrders: async (phone) => {
       const orders = await recentOrdersFor(organizationId, phone);
       return orders.map((o) => {
@@ -209,6 +216,7 @@ export async function startReceptionist(
     keySource: key?.source ?? "shared",
     keyterms: takeawayKeyterms({ businessName: shop.businessName }),
     draft: tools.draft,
+    finish: tools.finish,
   };
 }
 

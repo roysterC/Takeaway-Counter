@@ -3,7 +3,7 @@
  *
  * No recording, transcript or summary is kept: a call is logged only as its
  * outcomes, read from what the receptionist actually did, never from what it
- * said. An order counts only if place_order succeeded.
+ * said. An order counts only if it reached the kitchen when the call ended.
  */
 
 import type { TurnResult } from "./engine";
@@ -19,7 +19,6 @@ function succeeded(name: string, result: unknown): boolean {
 }
 
 const DONE: Record<string, CallOutcome> = {
-  place_order: "ordered",
   check_order_status: "order_status",
   take_message: "message",
 };
@@ -38,5 +37,15 @@ export function callOutcomes(turns: TurnResult[], endedByReceptionist: boolean):
     }
   }
   if (done.size === 0) return [endedByReceptionist ? "enquiry" : "hung_up"];
+  return CALL_OUTCOMES.filter((o) => done.has(o));
+}
+
+/**
+ * The outcomes with the order the call produced, if it produced one: sent
+ * to the kitchen once the call ended, so not something any tool did.
+ */
+export function withOrder(outcomes: CallOutcome[], ordered: boolean): CallOutcome[] {
+  if (!ordered) return outcomes;
+  const done = new Set<CallOutcome>([...outcomes.filter((o) => o !== "enquiry" && o !== "hung_up"), "ordered"]);
   return CALL_OUTCOMES.filter((o) => done.has(o));
 }
