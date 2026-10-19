@@ -8,8 +8,11 @@ Two parts:
 
 1. **The phone receptionist.** It answers *"Hello, it's Hixon Chinese
    Takeaway. Is it for collection or delivery?"*, confirms the caller's name
-   (and address, for delivery), takes the order from the real menu, reads it
-   back with the total, and sends it to the kitchen once the caller says yes.
+   (and address, for delivery), and takes the order from the real menu,
+   confirming each dish with just the quantity and name ("One Chicken Chow
+   Mein."). When the caller says that's everything, it sends the order to the
+   kitchen and reads it back with the total, the time and "See you soon!"
+   before hanging up.
    Regulars are recognised by their number ("Is that to 14 Smithy Lane
    again?"). It also tells callers where their order is, and takes messages
    for the staff.
@@ -42,9 +45,13 @@ The receptionist does the talking; the code keeps the books.
 - **Order placement** goes through `placeOrder`, which re-checks everything
   against the database: prices, sold-out dishes, opening hours, the pause
   switch and the delivery zone.
-- **The read-back rule** is enforced in code (`src/lib/order-draft.ts`). An
-  order can't be placed unless it has been read back unchanged *and* the
-  caller has spoken since.
+- **Corrections after the read-back.** There is no "is that right?": the
+  order goes to the kitchen when the caller says they've finished. If they
+  speak up during the read-back ("no, I said two"), the line stays open and
+  the order already sent is corrected in place, keeping its number, as long
+  as it is still New on the board (`src/lib/order-draft.ts`, `amendOrder` in
+  `src/lib/orders.ts`). Once the kitchen has started it, the change becomes a
+  message for the staff.
 - **Nothing that was said is stored.** Each call is logged only as what it
   came to: ordered, checked an order, left a message, enquiry or hung up.
 

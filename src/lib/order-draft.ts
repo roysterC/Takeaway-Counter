@@ -1,21 +1,21 @@
 /**
  * The order being taken on one call: collection or delivery, who it is for,
  * and what is in it. Held in memory for the length of the call and written to
- * the database only when the caller has heard it read back and said yes.
+ * the database when the caller says they have finished ordering.
  *
- * The read-back rule is enforced here, not left to the prompt. A model told
- * "read the order back before placing it" will usually do so, and now and
- * then will place it straight after adding the last item. So:
+ * There is no "is that right?" before placing: the shop wants the order sent
+ * as soon as the caller says that's everything, then read back with the total
+ * and the time. A caller who hears a mistake in that read-back can still say
+ * so, and the order is corrected rather than placed again:
  *
  * - every change to the order bumps `version`;
- * - review() records the version it read back and the caller turn it was in;
- * - placing is refused unless the order is unchanged since that read-back AND
- *   the caller has spoken since (their "yes"), so the read-back and the
- *   placing cannot happen in the same breath.
+ * - placing records the version that went to the kitchen;
+ * - a change after that makes `needsSaving` true, and the next place_order
+ *   updates the order already placed instead of making a second one.
  */
 
 import type { MenuEntry } from "@/lib/menu";
-import { formatPence, spokenPrice } from "@/lib/money";
+import { formatPence, spokenNumber, spokenPrice } from "@/lib/money";
 
 export type OrderType = "collection" | "delivery";
 
@@ -55,8 +55,9 @@ export class OrderDraft {
   deliveryFeePence = 0;
 
   version = 0;
-  private reviewed: { version: number; turn: number } | null = null;
   placed: { orderId: string; number: number } | null = null;
+  /** The version that went to the kitchen. */
+  private placedVersion: number | null = null;
 
   private touch() {
     this.version++;
@@ -163,7 +164,7 @@ export class OrderDraft {
     };
   }
 
-  /** What still stops the order being read back, in the order to ask about it. */
+  /** What still stops the order being placed, in the order to ask about it. */
   missing(): string[] {
     const out: string[] = [];
     if (!this.type) out.push("whether it is for collection or delivery");
@@ -177,46 +178,45 @@ export class OrderDraft {
     return out;
   }
 
-  /** Record that the order, as it stands, has been read back during `turn`. */
-  markReviewed(turn: number) {
-    this.reviewed = { version: this.version, turn };
+  /** The order, as it stands, has gone to the kitchen as `number`. */
+  markPlaced(orderId: string, number: number) {
+    this.placed = { orderId, number };
+    this.placedVersion = this.version;
   }
 
-  /** Why the order cannot be placed yet, or null when it can. */
-  placeRefusal(turn: number): string | null {
-    if (this.placed) return `This order has already been placed as order number ${this.placed.number}. Do not place it again.`;
-    if (!this.reviewed || this.reviewed.version !== this.version) {
-      return "Not placed: the order has not been read back as it now stands. Use review_order, read it to the caller, and wait for them to confirm.";
-    }
-    if (turn <= this.reviewed.turn) {
-      return "Not placed: read the order back and wait for the caller to say it is right before placing it.";
-    }
-    return null;
+  /** Placed, and changed since: the kitchen's copy is out of date. */
+  get needsSaving(): boolean {
+    return this.placed !== null && this.placedVersion !== this.version;
   }
 
   /**
-   * The read-back, as a sentence the receptionist can say: dishes, how it is
-   * reaching them, and the money. Prices in words, so the voice never says
-   * "pound sign".
+   * The dishes as the caller hears them confirmed: "one Chicken Chow Mein and
+   * two Egg Fried Rice". Quantities in words, no prices.
    */
-  readBack(readyInMinutes: number | null): string {
-    const dishes = this.lines.map((l) => `${l.quantity} ${l.item.name}${l.notes ? ` (${l.notes})` : ""}`);
+  static spokenDishes(lines: Array<{ quantity: number; name: string; notes?: string | null }>): string {
+    return listing(lines.map((l) => `${spokenNumber(l.quantity)} ${l.name}${l.notes ? `, ${l.notes}` : ""}`));
+  }
+
+  /**
+   * The read-back once the order has gone to the kitchen, as the
+   * receptionist says it before putting the phone down: the dishes, how it
+   * is reaching them, the money, how long, and goodbye. Prices in words, so
+   * the voice never says "pound sign".
+   */
+  readBack(readyInMinutes: number): string {
     const how =
       this.type === "delivery"
         ? `for delivery to ${[this.customer.addressLine1, this.customer.postcode].filter(Boolean).join(", ")}`
         : "for collection";
-    const who = this.customer.name ? `, under the name ${this.customer.name}` : "";
     const money =
       this.type === "delivery" && this.deliveryFeePence > 0
-        ? `The food comes to ${spokenPrice(this.subtotalPence)}, plus ${spokenPrice(this.deliveryFeePence)} delivery, so ${spokenPrice(this.totalPence)} altogether, paid in cash`
-        : `That comes to ${spokenPrice(this.totalPence)}, paid in cash${this.type === "delivery" ? " with free delivery" : ""}`;
+        ? `That's ${spokenPrice(this.totalPence)} including ${spokenPrice(this.deliveryFeePence)} delivery, cash on delivery`
+        : `That's ${spokenPrice(this.totalPence)}, cash on ${this.type === "delivery" ? "delivery" : "collection"}`;
     const when =
-      readyInMinutes === null
-        ? ""
-        : this.type === "delivery"
-          ? ` It should be with you in about ${readyInMinutes} minutes.`
-          : ` It will be ready in about ${readyInMinutes} minutes.`;
-    return `So that's ${listing(dishes)}, ${how}${who}. ${money}.${when}`;
+      this.type === "delivery"
+        ? `It'll be with you in about ${readyInMinutes} minutes.`
+        : `It'll be ready to collect in about ${readyInMinutes} minutes.`;
+    return `So that's ${OrderDraft.spokenDishes(this.lines.map((l) => ({ quantity: l.quantity, name: l.item.name, notes: l.notes })))}, ${how}. ${money}. ${when} See you soon!`;
   }
 }
 

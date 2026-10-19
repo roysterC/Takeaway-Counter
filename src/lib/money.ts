@@ -15,6 +15,11 @@ const ONES = [
 ];
 const TENS = ["", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety"];
 
+/** A whole number in words, as said aloud: "one", "twenty-two". */
+export function spokenNumber(n: number): string {
+  return words(n);
+}
+
 function words(n: number): string {
   if (n < 20) return ONES[n];
   if (n < 100) return TENS[Math.floor(n / 10)] + (n % 10 ? `-${ONES[n % 10]}` : "");
