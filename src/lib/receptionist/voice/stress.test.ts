@@ -36,6 +36,7 @@ function harness(
     silence?: { promptMs: number; hangupMs: number } | null;
     openStt?: () => Promise<void>;
     tts?: TextToSpeech;
+    quietGoodbye?: () => string | null;
   } = {}
 ) {
   const handlers: SttHandlers[] = [];
@@ -65,6 +66,7 @@ function harness(
     out: { audio: () => {}, clear, event: (e) => events.push(e), hangup },
     greeting: "Thank you for calling Shogo.",
     silence: opts.silence === undefined ? null : opts.silence,
+    quietGoodbye: opts.quietGoodbye,
     hangupGraceMs: 0,
   });
   const stt = () => handlers[handlers.length - 1];
@@ -151,6 +153,34 @@ describe("a caller who goes quiet", () => {
     expect(h.spoken.at(-1)).toMatch(/goodbye/i);
     await vi.advanceTimersByTimeAsync(2000);
     expect(h.hangup).toHaveBeenCalledTimes(1);
+  });
+
+  it("once their business is done, says goodbye instead of checking", async () => {
+    let done_ = false;
+    const h = harness(async () => done("That's eleven pounds sixty."), {
+      silence: { promptMs: 8000, hangupMs: 8000 },
+      quietGoodbye: () => (done_ ? "See you soon!" : null),
+    });
+    await h.call.start();
+    await vi.advanceTimersByTimeAsync(1000); // greeting plays
+    done_ = true; // the order went in
+    await h.says("yes that's right");
+    await vi.advanceTimersByTimeAsync(9500);
+    expect(h.spoken).not.toContain("Are you still there?");
+    expect(h.spoken.at(-1)).toBe("See you soon!");
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(h.hangup).toHaveBeenCalledTimes(1);
+  });
+
+  it("checks as usual while there is still business to do", async () => {
+    const h = harness(async () => done("Okay."), {
+      silence: { promptMs: 8000, hangupMs: 8000 },
+      quietGoodbye: () => null,
+    });
+    await h.call.start();
+    await vi.advanceTimersByTimeAsync(9500);
+    expect(h.spoken).toContain("Are you still there?");
+    expect(h.hangup).not.toHaveBeenCalled();
   });
 
   it("carries on as normal if they answer the check", async () => {

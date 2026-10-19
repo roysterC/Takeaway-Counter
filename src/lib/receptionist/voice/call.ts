@@ -88,6 +88,13 @@ export interface VoiceCallDeps {
    * finished, what they said is answered as their first turn.
    */
   greetingInterruptible?: boolean;
+  /**
+   * Asked when the caller has gone quiet: a goodbye to say and hang up on
+   * straight away, instead of "Are you still there?". Null keeps the usual
+   * check. For a call whose business is done, where silence means they have
+   * nothing more to say.
+   */
+  quietGoodbye?: () => string | null;
 }
 
 export const SILENCE_PROMPT = "Are you still there?";
@@ -260,6 +267,11 @@ export class VoiceCall {
       }
       const quiet = now - this.lastActivity;
       if (!this.silencePrompted && quiet >= silence.promptMs) {
+        const bye = this.deps.quietGoodbye?.();
+        if (bye) {
+          this.sayGoodbyeAndHangUp(bye);
+          return;
+        }
         this.silencePrompted = true;
         this.lastActivity = now;
         const ctl = new AbortController();
