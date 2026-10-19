@@ -10,7 +10,9 @@ Two parts:
    Takeaway. Is it for collection or delivery?"*, confirms the caller's name
    (and address, for delivery), and takes the order from the real menu.
    A new delivery customer is only asked for their postcode and house
-   number: the address is looked up (Ideal Postcodes, `IDEAL_POSTCODES_API_KEY`).
+   number or name: the address is looked up (Ideal Postcodes,
+   `IDEAL_POSTCODES_API_KEY`), and house names are matched allowing for how
+   they come through on a phone line.
    It confirms each dish with just the quantity and name ("One Chicken Chow
    Mein."). When the caller says that's everything, it checks the order for
    rice, chips or noodles and, if there are none, asks "Would you like any

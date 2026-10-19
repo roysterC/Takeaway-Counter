@@ -110,10 +110,52 @@ export async function lookupPostcode(
 const tokens = (s: string | null | undefined) =>
   (s ?? "")
     .toLowerCase()
+    .replace(/['’]/g, "")
     .replace(/\b(number|no)\b\.?/g, " ")
     .replace(/[^a-z0-9 ]+/g, " ")
     .split(/\s+/)
     .filter(Boolean);
+
+const hasDigit = (t: string) => /\d/.test(t);
+
+/** Words that are never what tells two houses apart. */
+const FILLER = new Set(["the", "a", "at", "its", "it", "is", "called"]);
+
+/**
+ * A name word as it is compared: plural and possessive endings taken off, so
+ * "The Hollies", "Hollys" and "Holly's" all come to "holly".
+ */
+function stem(w: string): string {
+  if (w.length > 4 && w.endsWith("ies")) return `${w.slice(0, -3)}y`;
+  if (w.length > 3 && w.endsWith("s") && !w.endsWith("ss")) return w.slice(0, -1);
+  return w;
+}
+
+function distance(a: string, b: string): number {
+  const row = Array.from({ length: b.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= a.length; i++) {
+    let prev = row[0];
+    row[0] = i;
+    for (let j = 1; j <= b.length; j++) {
+      const was = row[j];
+      row[j] = Math.min(row[j] + 1, row[j - 1] + 1, prev + (a[i - 1] === b[j - 1] ? 0 : 1));
+      prev = was;
+    }
+  }
+  return row[b.length];
+}
+
+/**
+ * How close a heard word is to a word of a house name: 2 the same, 1 a
+ * likely mishearing ("cotage", "forje"), 0 different. Short words must match
+ * exactly, or "Rose" would be taken for "Ross".
+ */
+function closeness(heard: string, name: string): 0 | 1 | 2 {
+  if (heard === name) return 2;
+  const n = Math.min(heard.length, name.length);
+  if (n < 5) return 0;
+  return distance(heard, name) <= (n >= 8 ? 2 : 1) ? 1 : 0;
+}
 
 export type AddressMatch =
   | { kind: "found"; address: FoundAddress }
@@ -124,28 +166,84 @@ export type AddressMatch =
  * The caller's address among a postcode's, from what they said: a house
  * number ("14", "2a"), a house name ("Rose Cottage"), a flat ("flat 2, 14"),
  * optionally the street when the postcode covers more than one.
+ *
+ * Numbers must match exactly: 14 and 41 are different houses. House names
+ * are matched the way they reach us down a phone line: a word or two
+ * misheard ("Rose Cotage"), run together or split ("Wood Lands"), part of
+ * the name ("Ivy" when it's the only Ivy), an extra word ("the Old Forge
+ * house"), or the street said with it ("Rose Cottage, Smithy Lane").
  */
 export function matchAddress(addresses: FoundAddress[], said: { house: string; street?: string | null }): AddressMatch {
-  const want = tokens(said.house);
-  if (!want.length) return { kind: "none" };
+  const heard = tokens(said.house);
+  if (!heard.length) return { kind: "none" };
+  const numbersSaid = heard.filter(hasDigit);
+  const wordsSaid = heard.filter((t) => !hasDigit(t) && !FILLER.has(t)).map(stem);
   const streetWords = tokens(said.street);
 
   const scored = addresses
     .map((a) => {
-      const have = new Set([...tokens(a.number), ...tokens(a.building), ...tokens(a.subBuilding), ...tokens(a.line1)]);
-      const numbers = new Set([...tokens(a.number), ...tokens(a.subBuilding).filter((t) => /\d/.test(t))]);
-      // Every word they said must be there, and any number they said must be a
-      // house or flat number here, not part of a street name.
-      const ok = want.every((w) => have.has(w)) && want.filter((w) => /\d/.test(w)).every((w) => numbers.has(w));
-      const onStreet = !streetWords.length || streetWords.every((w) => tokens(a.street ?? a.line1).includes(w));
-      return { a, ok: ok && onStreet, exactNumber: a.number?.toLowerCase() === want.join("") && !a.subBuilding };
+      // Any number they said must be this house's or flat's number, never a
+      // number that happens to be in a street name.
+      const numbers = new Set([...tokens(a.number), ...tokens(a.subBuilding).filter(hasDigit)]);
+      if (!numbersSaid.every((n) => numbers.has(n))) return null;
+      if (streetWords.length && !streetWords.every((w) => tokens(a.street ?? a.line1).includes(w))) return null;
+
+      const exactNumber = numbersSaid.length > 0 && a.number?.toLowerCase() === numbersSaid.join("") && !a.subBuilding;
+      const nameWords = [...tokens(a.building), ...tokens(a.subBuilding)].filter((t) => !hasDigit(t) && !FILLER.has(t)).map(stem);
+      // The street, village or town said along with the name is not part of it.
+      const place = new Set([...tokens(a.street), ...tokens(a.line2), ...tokens(a.town)].map(stem));
+      const spoken = wordsSaid.filter((w) => !place.has(w) || nameWords.includes(w));
+
+      if (!spoken.length) return numbersSaid.length ? { a, score: exactNumber ? 3 : 1, exactNumber } : null;
+      if (!nameWords.length) return null;
+
+      let score = 0;
+      let unmatched = 0;
+      for (const w of spoken) {
+        const best = Math.max(0, ...nameWords.map((n) => closeness(w, n)));
+        if (best) score += best;
+        else unmatched++;
+      }
+      const covered = nameWords.filter((n) => spoken.some((w) => closeness(w, n))).length;
+      // "Wood Lands" for Woodlands, "Oak Tree" for Oaktree.
+      const joined = closeness(spoken.join(""), nameWords.join("")) > 0;
+      const wholeName = covered === nameWords.length || joined;
+      // Everything they said is in the name (word by word, or run together),
+      // or they said the whole name and at most one word more ("house").
+      if (joined) unmatched = 0;
+      if (!(unmatched === 0 || (wholeName && unmatched <= 1))) return null;
+      return { a, score: score + (wholeName ? 2 : 0) + (joined ? 2 : 0) - unmatched, exactNumber };
     })
-    .filter((s) => s.ok);
+    .filter((s): s is { a: FoundAddress; score: number; exactNumber: boolean } => s !== null);
 
   if (scored.length === 1) return { kind: "found", address: scored[0].a };
   if (!scored.length) return { kind: "none" };
   // "14" with a house at 14 and flats at 14: the house, unless they said a flat.
   const exact = scored.filter((s) => s.exactNumber);
   if (exact.length === 1) return { kind: "found", address: exact[0].a };
-  return { kind: "choose", options: scored.slice(0, 6).map((s) => s.a) };
+  // One clearly closer than the rest: "Ivy House" over Ivy Cottage.
+  const top = Math.max(...scored.map((s) => s.score));
+  const best = scored.filter((s) => s.score === top);
+  if (best.length === 1) return { kind: "found", address: best[0].a };
+  return { kind: "choose", options: best.slice(0, 6).map((s) => s.a) };
+}
+
+/**
+ * The named houses at a postcode nearest to a name that matched none of
+ * them, for "did you mean The Hollies?". Closest first; at most three, and
+ * only ones near enough to be worth asking about.
+ */
+export function nearestNames(addresses: FoundAddress[], name: string): FoundAddress[] {
+  const heard = tokens(name).filter((t) => !hasDigit(t) && !FILLER.has(t)).map(stem).join("");
+  if (heard.length < 3) return [];
+  return addresses
+    .filter((a) => a.building)
+    .map((a) => {
+      const full = tokens(a.building).filter((t) => !FILLER.has(t)).map(stem).join("");
+      return { a, ratio: distance(heard, full) / Math.max(heard.length, full.length) };
+    })
+    .filter((x) => x.ratio <= 0.5)
+    .sort((x, y) => x.ratio - y.ratio)
+    .slice(0, 3)
+    .map((x) => x.a);
 }
