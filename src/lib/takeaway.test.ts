@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { normalisePostcode, quoteDelivery, tidyPrefix, zoneFor, MOCK_HIXON_ZONES, type DeliveryRules } from "./delivery";
 import { describeHours, openStatus, parseOpeningHours, shopDayRange, spokenNextOpen, spokenTime } from "./hours";
-import { findMenuItem, normaliseCode, type MenuEntry } from "./menu";
+import { findMenuItem, isStapleByDefault, normaliseCode, type MenuEntry } from "./menu";
 import { formatPence, parsePounds, spokenPrice } from "./money";
 import { nextStatus } from "./orders";
 import { HIXON_MENU } from "./menu-data/hixon";
@@ -149,8 +149,41 @@ describe("the menu", () => {
       available: true,
       aliases: [],
       category: c.name,
+      staple: isStapleByDefault(name, c.name),
     }))
   );
+
+  it("knows which dishes are, or come with, rice, chips or noodles", () => {
+    const staple = (name: string) => menu.find((m) => m.name === name)!.staple;
+    for (const name of [
+      "Egg Fried Rice",
+      "Boiled Rice",
+      "Chicken & Pineapple Fried Rice",
+      "House Special Fried Rice",
+      "Chicken Chow Mein",
+      "Singapore Vermicelli",
+      "House Special Beef Chow Mein",
+      "Chips",
+      "Salt Chilli Pepper Chips",
+      "3 in 1 Special",
+      "Chicken Omelette",
+      "Set Meal A for 2 Persons",
+    ]) {
+      expect([name, staple(name)]).toEqual([name, true]);
+    }
+    for (const name of [
+      "Sweet & Sour Chicken Hong Kong Style",
+      "Chicken Curry",
+      "Chicken & Noodle Soup",
+      "Pork Yuk Sung",
+      "Prawn Crackers",
+      "Curry Sauce",
+      "Spring Rolls (2)",
+      "Crispy Aromatic Duck (Half)",
+    ]) {
+      expect([name, staple(name)]).toEqual([name, false]);
+    }
+  });
 
   it("transcribes every price as whole pence", () => {
     for (const m of menu) expect(Number.isInteger(m.pricePence) && m.pricePence > 0).toBe(true);

@@ -6,7 +6,7 @@
 import { prisma } from "@/lib/prisma";
 import { parseOpeningHours, type DayHours } from "@/lib/hours";
 import { parseZones, type DeliveryRules } from "@/lib/delivery";
-import type { MenuEntry, MenuSection } from "@/lib/menu";
+import { isStapleByDefault, type MenuEntry, type MenuSection } from "@/lib/menu";
 
 export interface ShopConfig {
   organizationId: string;
@@ -67,6 +67,7 @@ export async function getMenu(organizationId: string): Promise<MenuSection[]> {
         pricePence: i.pricePence,
         available: i.available,
         aliases: i.aliases,
+        staple: i.staple ?? isStapleByDefault(i.name, c.name),
         category: c.name,
       })
     ),

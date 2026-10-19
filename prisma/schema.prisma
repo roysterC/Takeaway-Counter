@@ -177,6 +177,11 @@ model MenuItem {
   available      Boolean      @default(true)
   // Other names callers use: "char siu" for roast pork, "special fried rice".
   aliases        String[]     @default([])
+  // Rice, chips or noodles, or a dish that comes with them. An order with
+  // none of these gets "would you like any rice or chips with that?" before
+  // it is placed. Null (the default) works it out from the name and section
+  // (isStapleByDefault in src/lib/menu.ts); the owner can set it either way.
+  staple         Boolean?
   sortOrder      Int          @default(0)
   orderItems     OrderItem[]
   createdAt      DateTime     @default(now())

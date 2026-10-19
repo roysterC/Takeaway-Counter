@@ -1,11 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import type Anthropic from "@anthropic-ai/sdk";
 import { END_CALL_TOOL, ReceptionistEngine, type StreamingClient } from "./engine";
-import { ORDER_TOOLS, orderTools, type OrderToolDeps } from "./order-tools";
+import { CARBS_QUESTION, ORDER_TOOLS, orderTools, type OrderToolDeps } from "./order-tools";
 import { buildCallContext, buildStableSystem, greetingFor } from "./prompt";
 import { MOCK_HIXON_ZONES } from "@/lib/delivery";
 import { parseOpeningHours } from "@/lib/hours";
-import type { MenuEntry } from "@/lib/menu";
+import { isStapleByDefault, type MenuEntry } from "@/lib/menu";
 import type { PlaceOrderInput } from "@/lib/orders";
 
 const item = (id: string, code: string | null, name: string, pricePence: number, available = true): MenuEntry => ({
@@ -17,6 +17,7 @@ const item = (id: string, code: string | null, name: string, pricePence: number,
   available,
   aliases: [],
   category: "Test",
+  staple: isStapleByDefault(name, "Test"),
 });
 
 const MENU = [
@@ -112,6 +113,7 @@ describe("taking an order", () => {
     await t.execute("set_order_type", { type: "collection" });
     await t.execute("set_customer_details", { name: "Dave" });
     await t.execute("add_items", { items: [{ code: "94", quantity: 1 }] });
+    await t.execute("place_order", {}); // "Would you like any rice or chips?" "No thanks."
     await t.execute("place_order", {});
     // "No, I said two."
     const changed = (await t.execute("change_item", { line: 1, quantity: 2 })) as { note?: string };
@@ -130,9 +132,58 @@ describe("taking an order", () => {
     await t.execute("set_order_type", { type: "collection" });
     await t.execute("set_customer_details", { name: "Dave" });
     await t.execute("add_items", { items: [{ code: "94", quantity: 1 }] });
+    await t.execute("place_order", {}); // the rice question
     await t.execute("place_order", {});
     await t.execute("add_items", { items: [{ code: "170", quantity: 1 }] });
     expect(await t.execute("place_order", {})).toMatchObject({ success: false, then: expect.stringContaining("take a message") });
+  });
+
+  it("offers rice or chips once, when the caller has finished and ordered none", async () => {
+    const t = setup();
+    await t.execute("set_order_type", { type: "collection" });
+    await t.execute("set_customer_details", { name: "Dave" });
+    // While ordering, nothing is offered: just the dish.
+    const added = (await t.execute("add_items", { items: [{ code: "94", quantity: 1 }] })) as Record<string, unknown>;
+    expect(added).not.toHaveProperty("ask");
+    expect(added.say).toBe("One Sweet & Sour Chicken Hong Kong Style.");
+
+    // "That's everything": asked instead of placed.
+    expect(await t.execute("place_order", {})).toMatchObject({ success: false, ask: CARBS_QUESTION });
+    expect(t.placed).toHaveLength(0);
+
+    // "Yes, an egg fried rice": added and placed, with no second question.
+    await t.execute("add_items", { items: [{ code: "170", quantity: 1 }] });
+    const placed = (await t.execute("place_order", {})) as { success: boolean; readBack: string };
+    expect(placed.success).toBe(true);
+    expect(placed.readBack).toContain("one Sweet & Sour Chicken Hong Kong Style and one Egg Fried Rice");
+    expect(t.placed[0].lines.map((l) => l.menuItemId)).toEqual(["ss", "efr"]);
+  });
+
+  it("places on 'no thanks' without asking again", async () => {
+    const t = setup();
+    await t.execute("set_order_type", { type: "collection" });
+    await t.execute("set_customer_details", { name: "Dave" });
+    await t.execute("add_items", { items: [{ code: "94", quantity: 1 }] });
+    expect(await t.execute("place_order", {})).toMatchObject({ ask: CARBS_QUESTION });
+    expect(await t.execute("place_order", {})).toMatchObject({ success: true });
+    expect(t.placed).toHaveLength(1);
+  });
+
+  it("does not offer rice or chips when the order already has some", async () => {
+    const t = setup();
+    await t.execute("set_order_type", { type: "collection" });
+    await t.execute("set_customer_details", { name: "Dave" });
+    await t.execute("add_items", { items: [{ code: "94", quantity: 1 }, { code: "147", quantity: 1 }] });
+    expect(await t.execute("place_order", {})).toMatchObject({ success: true });
+  });
+
+  it("asks for missing details before the rice question", async () => {
+    const t = setup();
+    await t.execute("set_order_type", { type: "collection" });
+    await t.execute("add_items", { items: [{ code: "94", quantity: 1 }] });
+    expect(await t.execute("place_order", {})).toMatchObject({ success: false, askFor: ["the caller's name"] });
+    await t.execute("set_customer_details", { name: "Dave" });
+    expect(await t.execute("place_order", {})).toMatchObject({ ask: CARBS_QUESTION });
   });
 
   it("asks rather than guesses when a number covers a choice", async () => {

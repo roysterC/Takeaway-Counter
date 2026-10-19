@@ -58,6 +58,8 @@ export class OrderDraft {
   placed: { orderId: string; number: number } | null = null;
   /** The version that went to the kitchen. */
   private placedVersion: number | null = null;
+  /** "Would you like any rice or chips?" has been asked: once a call is enough. */
+  carbsOffered = false;
 
   private touch() {
     this.version++;
@@ -176,6 +178,11 @@ export class OrderDraft {
     if (!this.customer.phone) out.push("a contact phone number");
     if (!this.lines.length) out.push("at least one dish");
     return out;
+  }
+
+  /** Something on the order is, or comes with, rice, chips or noodles. */
+  get hasStaple(): boolean {
+    return this.lines.some((l) => l.item.staple);
   }
 
   /** The order, as it stands, has gone to the kitchen as `number`. */

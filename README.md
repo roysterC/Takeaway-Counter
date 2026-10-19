@@ -10,7 +10,9 @@ Two parts:
    Takeaway. Is it for collection or delivery?"*, confirms the caller's name
    (and address, for delivery), and takes the order from the real menu,
    confirming each dish with just the quantity and name ("One Chicken Chow
-   Mein."). When the caller says that's everything, it sends the order to the
+   Mein."). When the caller says that's everything, it checks the order for
+   rice, chips or noodles and, if there are none, asks "Would you like any
+   rice or chips with that?" once. Then it sends the order to the
    kitchen and reads it back with the total, the time and "See you soon!"
    before hanging up.
    Regulars are recognised by their number ("Is that to 14 Smithy Lane
@@ -45,6 +47,11 @@ The receptionist does the talking; the code keeps the books.
 - **Order placement** goes through `placeOrder`, which re-checks everything
   against the database: prices, sold-out dishes, opening hours, the pause
   switch and the delivery zone.
+- **Rice or chips.** Which dishes count as rice, chips or noodles is worked
+  out from the dish name and its menu section (fried rice, chow mein,
+  omelettes with chips, set meals), and can be set per dish in **Menu**.
+  The question is asked once, only after the caller has finished ordering,
+  and never when correcting an order already sent.
 - **Corrections after the read-back.** There is no "is that right?": the
   order goes to the kitchen when the caller says they've finished. If they
   speak up during the read-back ("no, I said two"), the line stays open and

@@ -30,6 +30,9 @@ interface Item {
   pricePence: number;
   available: boolean;
   aliases: string[];
+  /** Set by the owner, or null for automatic (stapleAuto). */
+  staple: boolean | null;
+  stapleAuto: boolean;
   categoryId: string;
 }
 interface Section {
@@ -39,7 +42,19 @@ interface Section {
   items: Item[];
 }
 
-type ItemDraft = { id?: string; categoryId: string; code: string; name: string; price: string; description: string; aliases: string };
+type Staple = "auto" | "yes" | "no";
+type ItemDraft = {
+  id?: string;
+  categoryId: string;
+  code: string;
+  name: string;
+  price: string;
+  description: string;
+  aliases: string;
+  staple: Staple;
+  /** What automatic comes to for this dish, to show beside the choice. */
+  stapleAuto?: boolean;
+};
 type SectionDraft = { id?: string; name: string; note: string };
 
 export default function MenuPage() {
@@ -112,7 +127,7 @@ export default function MenuPage() {
               </div>
               {isOwner && (
                 <div className="flex gap-1">
-                  <Button size="sm" variant="ghost" onClick={() => setItem({ categoryId: s.id, code: "", name: "", price: "", description: "", aliases: "" })}>
+                  <Button size="sm" variant="ghost" onClick={() => setItem({ categoryId: s.id, code: "", name: "", price: "", description: "", aliases: "", staple: "auto" })}>
                     <Plus /> Dish
                   </Button>
                   <Button size="icon-sm" variant="ghost" aria-label="Edit section" onClick={() => setSection({ id: s.id, name: s.name, note: s.note ?? "" })}>
@@ -126,7 +141,14 @@ export default function MenuPage() {
                 <li key={i.id} className={cn("flex items-center gap-3 px-4 py-2 text-sm", !i.available && "bg-stone-50")}>
                   <span className="w-12 shrink-0 font-mono text-xs text-muted-foreground">{i.code}</span>
                   <div className="min-w-0 flex-1">
-                    <p className={cn(!i.available && "text-muted-foreground line-through")}>{i.name}</p>
+                    <p className={cn(!i.available && "text-muted-foreground line-through")}>
+                      {i.name}
+                      {(i.staple ?? i.stapleAuto) && (
+                        <span className="ml-2 rounded bg-amber-50 px-1.5 py-0.5 text-[10px] font-medium text-amber-800" title="Counts as rice, chips or noodles">
+                          rice/chips
+                        </span>
+                      )}
+                    </p>
                     {i.description && <p className="truncate text-xs text-muted-foreground">{i.description}</p>}
                   </div>
                   <span className="w-16 text-right tabular-nums">{formatPence(i.pricePence)}</span>
@@ -156,6 +178,8 @@ export default function MenuPage() {
                             price: (i.pricePence / 100).toFixed(2),
                             description: i.description ?? "",
                             aliases: i.aliases.join(", "),
+                            staple: i.staple === null ? "auto" : i.staple ? "yes" : "no",
+                            stapleAuto: i.stapleAuto,
                           })
                         }
                       >
@@ -186,7 +210,15 @@ export default function MenuPage() {
         sections={data?.sections ?? []}
         onClose={() => setItem(null)}
         onSave={async (d) => {
-          const body = { categoryId: d.categoryId, code: d.code, name: d.name, price: d.price, description: d.description, aliases: d.aliases };
+          const body = {
+            categoryId: d.categoryId,
+            code: d.code,
+            name: d.name,
+            price: d.price,
+            description: d.description,
+            aliases: d.aliases,
+            staple: d.staple === "auto" ? null : d.staple === "yes",
+          };
           const ok = d.id ? await call(`/api/menu/items/${d.id}`, "PATCH", body) : await call("/api/menu", "POST", { kind: "item", ...body });
           if (ok) setItem(null);
         }}
@@ -262,6 +294,13 @@ function ItemDialog({
             </div>
             <Labelled label="Description (told to callers who ask)">
               <Textarea value={form.description} onChange={set("description")} rows={2} />
+            </Labelled>
+            <Labelled label={'Rice, chips or noodles? An order with none gets "Would you like any rice or chips?"'}>
+              <select value={form.staple} onChange={set("staple")} className="h-8 rounded-lg border border-input bg-card px-2 text-sm">
+                <option value="auto">Automatic{form.id ? ` (${form.stapleAuto ? "yes" : "no"})` : " (from the name)"}</option>
+                <option value="yes">Yes: is or comes with rice, chips or noodles</option>
+                <option value="no">No</option>
+              </select>
             </Labelled>
             <Labelled label="Other names callers use, separated by commas">
               <Input value={form.aliases} onChange={set("aliases")} placeholder="e.g. char siu fried rice" />

@@ -111,7 +111,8 @@ export const ORDER_TOOLS: Anthropic.Tool[] = [
     description:
       "Send the order to the kitchen. Use it as soon as the caller says they have finished ordering " +
       "(\"that's everything\", \"that's all\", \"no, that's it\"). If anything is still needed, such as their " +
-      "name or address, you are told what to ask for instead. On success, say the readBack exactly as given " +
+      "name or address, or the order has no rice or chips, you are told what to ask instead. On success, say " +
+      "the readBack exactly as given " +
       "and end the call in the same reply. If the caller then corrects something, change the order and use " +
       "place_order again: it updates the order already sent rather than sending a second one.",
     input_schema: { type: "object", properties: {} },
@@ -141,6 +142,9 @@ export const ORDER_TOOLS: Anthropic.Tool[] = [
 ];
 
 export type OrderToolName = (typeof ORDER_TOOLS)[number]["name"];
+
+/** Asked before placing an order that has no rice, chips or noodles. */
+export const CARBS_QUESTION = "Would you like any rice or chips with that?";
 
 /** What place_order tells the model to do with its read-back. */
 const END = {
@@ -331,6 +335,19 @@ export function orderTools(deps: OrderToolDeps) {
         }
         const missing = draft.missing();
         if (missing.length) return { success: false, askFor: missing, then: "Ask for these, then use place_order again." };
+        // Nothing to eat it with: offer rice or chips, once, now the caller
+        // has finished ordering. Not when correcting an order already sent.
+        if (!draft.placed && !draft.hasStaple && !draft.carbsOffered) {
+          draft.carbsOffered = true;
+          return {
+            success: false,
+            ask: CARBS_QUESTION,
+            then:
+              "The order has no rice, chips or noodles. Ask exactly this and nothing else. If they want some, add " +
+              "it with add_items and use place_order in the same reply, without confirming the dish. If they " +
+              "don't, use place_order straight away.",
+          };
+        }
         if (draft.type === "delivery") {
           const q = requote();
           if (!q.ok) return { success: false, problem: "That address isn't in the delivery area. Offer collection." };

@@ -78,6 +78,11 @@ The greeting has already asked whether it is for collection or delivery.
    ask "is that everything?" or "is that right?" first. If it says something
    is still needed, such as their name or address, ask for that, then use
    place_order again.
+   - If the order has no rice, chips or noodles, place_order asks you to
+     say "Would you like any rice or chips with that?" instead. Ask exactly
+     that. If they want some, add it and use place_order in the same reply,
+     without confirming the dish first; if they don't, use place_order
+     straight away. Never offer rice or chips at any other point.
 5. When it succeeds, say its readBack exactly as given: the order, the
    price, how long, and "See you soon!". End the call with end_call in that
    same reply.

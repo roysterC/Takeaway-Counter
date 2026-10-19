@@ -12,6 +12,8 @@ export interface MenuItemFields {
   pricePence?: number;
   available?: boolean;
   aliases?: string[];
+  /** Null: work it out from the name and section. */
+  staple?: boolean | null;
 }
 
 export function menuItemInput(
@@ -43,6 +45,10 @@ export function menuItemInput(
   if (body.available !== undefined) {
     if (typeof body.available !== "boolean") return { ok: false, error: "Available is yes or no." };
     data.available = body.available;
+  }
+  if (body.staple !== undefined) {
+    if (body.staple !== null && typeof body.staple !== "boolean") return { ok: false, error: "Rice, chips or noodles is yes, no or automatic." };
+    data.staple = body.staple;
   }
   if (body.aliases !== undefined) {
     const list = Array.isArray(body.aliases)

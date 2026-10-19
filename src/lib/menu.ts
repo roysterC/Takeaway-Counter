@@ -20,6 +20,8 @@ export interface MenuEntry {
   available: boolean;
   aliases: string[];
   category: string;
+  /** Rice, chips or noodles, or comes with them: see isStapleByDefault. */
+  staple: boolean;
 }
 
 export interface MenuSection {
@@ -137,6 +139,20 @@ function matchByName(menu: MenuEntry[], name: string): MenuEntry[] {
   // contains the same words.
   if (scored[0].extra === 0 && (scored.length === 1 || scored[1].extra > 0)) return [scored[0].m];
   return scored.map((s) => s.m);
+}
+
+/**
+ * Whether a dish is, or comes with, rice, chips or noodles, when the owner
+ * hasn't said either way. By name: anything with rice, chips, noodles, chow
+ * mein or vermicelli in it, and a "3 in 1" (chips, rice and curry sauce).
+ * By section: fried rice and chow mein sections, omelettes (which come with
+ * chips) and set menus (which come with rice). Soups don't count, even
+ * chicken and noodle: nobody has that instead of rice.
+ */
+export function isStapleByDefault(name: string, category: string): boolean {
+  if (/\bsoup\b/i.test(name)) return false;
+  if (/\b(rice|chips?|noodles?|chow mein|vermicelli|3 in 1)\b/i.test(name)) return true;
+  return /fried rice|chow mein|omelette|set men/i.test(category);
 }
 
 /** "65a Roast Pork with Mushroom in Black Bean Sauce" */
