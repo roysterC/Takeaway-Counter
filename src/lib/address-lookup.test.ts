@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { lookupPostcode, matchAddress, titleCase } from "./address-lookup";
-import { ADDRESSES, RAW } from "./address-lookup.fixtures";
+import { lookupPostcode, matchAddress, nearestNames, titleCase } from "./address-lookup";
+import { ADDRESSES, NAMED, RAW } from "./address-lookup.fixtures";
 
 
 describe("reading addresses", () => {
@@ -42,6 +42,62 @@ describe("finding the caller's address", () => {
   it("finds nothing for a number that isn't there", () => {
     expect(matchAddress(ADDRESSES, { house: "99" }).kind).toBe("none");
     expect(matchAddress(ADDRESSES, { house: "" }).kind).toBe("none");
+  });
+});
+
+describe("finding a house by its name", () => {
+  const found = (house: string) => {
+    const m = matchAddress(NAMED, { house });
+    return m.kind === "found" ? m.address.line1 : m.kind === "choose" ? m.options.map((a) => a.line1) : "none";
+  };
+
+  it("with or without 'the', and with the street said too", () => {
+    expect(found("The Old Forge")).toBe("The Old Forge");
+    expect(found("old forge")).toBe("The Old Forge");
+    expect(found("Rose Cottage, Smithy Lane, Hixon")).toBe("Rose Cottage");
+  });
+
+  it("when the recogniser gets a letter or an ending wrong", () => {
+    expect(found("hollys")).toBe("The Hollies");
+    expect(found("holly's")).toBe("The Hollies");
+    expect(found("rose cotage")).toBe("Rose Cottage");
+    expect(found("hollis")).toBe("The Hollies");
+  });
+
+  it("run together or split apart, or with a word too many", () => {
+    expect(found("wood lands")).toBe("Woodlands");
+    expect(found("the old forge house")).toBe("The Old Forge");
+  });
+
+  it("by the name or the number of a house that has both", () => {
+    expect(found("meadow view")).toBe("Meadow View, 7 Smithy Lane");
+    expect(found("7")).toBe("Meadow View, 7 Smithy Lane");
+  });
+
+  it("asks when part of a name fits two houses, and picks the one named in full", () => {
+    expect(found("ivy")).toEqual(["Ivy House", "Ivy Cottage"]);
+    expect(found("ivy house")).toBe("Ivy House");
+    expect(found("rose villa")).toBe("Rose Villa");
+  });
+
+  it("doesn't stretch a name into a different house", () => {
+    expect(found("the willows")).toBe("none");
+    expect(found("forge cottage")).toBe("none");
+  });
+
+  it("takes a near name only when the exact one isn't there", () => {
+    // No Ross Cottage here: almost certainly Rose Cottage misheard, and the
+    // receptionist says the address back for the caller to correct.
+    expect(found("ross cottage")).toBe("Rose Cottage");
+    const both = [...NAMED, { ...NAMED[5], line1: "Ross Cottage", building: "Ross Cottage" }];
+    const m = matchAddress(both, { house: "ross cottage" });
+    expect(m.kind === "found" && m.address.line1).toBe("Ross Cottage");
+  });
+
+  it("offers the nearest names when nothing matches", () => {
+    expect(nearestNames(NAMED, "the hollows").map((a) => a.line1)).toEqual(["The Hollies"]);
+    expect(nearestNames(NAMED, "the willows").map((a) => a.line1)).not.toContain("Ivy House");
+    expect(nearestNames(NAMED, "xy")).toEqual([]);
   });
 });
 

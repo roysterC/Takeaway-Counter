@@ -4,7 +4,7 @@ import { END_CALL_TOOL, ReceptionistEngine, type StreamingClient } from "./engin
 import { CARBS_QUESTION, ORDER_TOOLS, orderTools, type OrderToolDeps } from "./order-tools";
 import { buildCallContext, buildStableSystem, greetingFor } from "./prompt";
 import { MOCK_HIXON_ZONES } from "@/lib/delivery";
-import { ADDRESSES } from "@/lib/address-lookup.fixtures";
+import { ADDRESSES, NAMED } from "@/lib/address-lookup.fixtures";
 import { parseOpeningHours } from "@/lib/hours";
 import { isStapleByDefault, type MenuEntry } from "@/lib/menu";
 import type { PlaceOrderInput } from "@/lib/orders";
@@ -222,6 +222,15 @@ describe("taking an order", () => {
     });
     expect(await t.execute("choose_address", { house: "99" })).toMatchObject({ ok: false, problem: expect.stringContaining("no 99") });
     expect(t.draft.customer.addressLine1).toBeNull();
+  });
+
+  it("finds a house by name, and asks about the nearest name when it can't", async () => {
+    const t = setup({ findAddresses: async () => ({ ok: true, addresses: NAMED }) });
+    await t.execute("set_order_type", { type: "delivery" });
+    await t.execute("find_address", { postcode: "ST18 0PR" });
+    expect(await t.execute("choose_address", { house: "the hollows" })).toMatchObject({ ok: false, didTheyMean: ["The Hollies, Smithy Lane, Hixon"] });
+    expect(await t.execute("choose_address", { house: "the hollies" })).toMatchObject({ ok: true, address: "The Hollies, Smithy Lane, Hixon" });
+    expect(t.draft.customer).toMatchObject({ addressLine1: "The Hollies", addressLine2: "Smithy Lane, Hixon", postcode: "ST18 0PR" });
   });
 
   it("doesn't look up a postcode outside the delivery area", async () => {

@@ -18,7 +18,7 @@ import { normalisePostcode, quoteDelivery, type DeliveryRules } from "@/lib/deli
 import { formatPence, spokenPrice } from "@/lib/money";
 import { normalisePhone, speakablePhone } from "@/lib/phone";
 import type { PlaceOrderInput, PlaceOrderResult } from "@/lib/orders";
-import { matchAddress, type FoundAddress, type LookupResult } from "@/lib/address-lookup";
+import { matchAddress, nearestNames, type FoundAddress, type LookupResult } from "@/lib/address-lookup";
 
 export const ORDER_TOOLS: Anthropic.Tool[] = [
   {
@@ -328,7 +328,8 @@ export function orderTools(deps: OrderToolDeps) {
           addresses: found.length,
           streets: streets.slice(0, 6),
           deliveryCharge: q.feePence ? spokenPrice(q.feePence) : "free",
-          then: "Ask for their house number or name" + (streets.length > 1 ? ", and the street" : "") + ", then use choose_address.",
+          then:
+            "Ask \"What's the house number or name?\"" + (streets.length > 1 ? ", and the street" : "") + ", then use choose_address.",
         };
       }
 
@@ -336,9 +337,18 @@ export function orderTools(deps: OrderToolDeps) {
         if (!found.length) return { error: "Look the postcode up with find_address first." };
         const match = matchAddress(found, { house: s(input.house) ?? "", street: s(input.street) });
         if (match.kind === "none") {
+          // A name that matched nothing may still be a mishearing of one that's there.
+          const near = nearestNames(found, s(input.house) ?? "");
+          if (near.length) {
+            return {
+              ok: false,
+              didTheyMean: near.map(spokenAddress),
+              then: "No house by that name here. Ask if they meant the first of these (one at a time; never read the list out). If they say yes, use choose_address with that name.",
+            };
+          }
           return {
             ok: false,
-            problem: `There's no ${s(input.house)} at ${draft.customer.postcode}. Ask them to say the house number again; if it still isn't found, take the first line of the address as they say it and record it with set_customer_details.`,
+            problem: `There's no ${s(input.house)} at ${draft.customer.postcode}. Ask them to say the house number or name again, or to spell the name; if it still isn't found, take the first line of the address as they say it and record it with set_customer_details.`,
           };
         }
         if (match.kind === "choose") {
