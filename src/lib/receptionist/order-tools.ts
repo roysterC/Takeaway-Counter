@@ -110,7 +110,7 @@ export const ORDER_TOOLS: Anthropic.Tool[] = [
     name: "change_item",
     description:
       "Change or remove a line already on the order, by its line number from the latest order summary. " +
-      "Quantity 0 removes it. Fine after the order has been placed too: use place_order again afterwards.",
+      "Quantity 0 removes it. Fine after the order has been placed too: then confirm_order and place_order again.",
     input_schema: {
       type: "object",
       properties: {
@@ -131,18 +131,25 @@ export const ORDER_TOOLS: Anthropic.Tool[] = [
     name: "review_order",
     description:
       "What is on the order so far and what it comes to. Only for when the caller asks (\"what have I got?\", " +
-      "\"how much is that?\"); do not read the order back otherwise until it is placed.",
+      "\"how much is that?\"). To read the order back when they have finished, use confirm_order instead.",
+    input_schema: { type: "object", properties: {} },
+  },
+  {
+    name: "confirm_order",
+    description:
+      "Read the order back for the caller to check, as soon as they say they have finished ordering " +
+      "(\"that's everything\", \"that's all\", \"no, that's it\"). If anything is still needed, such as their " +
+      "name or address, or the order has no rice or chips, you are told what to ask instead. Otherwise say the " +
+      "result's \"say\" exactly (\"So that's ..., is that correct?\") and wait for their answer.",
     input_schema: { type: "object", properties: {} },
   },
   {
     name: "place_order",
     description:
-      "Send the order to the kitchen. Use it as soon as the caller says they have finished ordering " +
-      "(\"that's everything\", \"that's all\", \"no, that's it\"). If anything is still needed, such as their " +
-      "name or address, or the order has no rice or chips, you are told what to ask instead. On success, say " +
-      "the readBack exactly as given " +
-      "and end the call in the same reply. If the caller then corrects something, change the order and use " +
-      "place_order again: it updates the order already sent rather than sending a second one.",
+      "Send the order to the kitchen, once the caller has said yes to confirm_order's question. Never in the " +
+      "same reply as the question. On success, say the result's \"say\" (the price and how long) and wait: do " +
+      "not say goodbye yet. A change after it has been placed goes through confirm_order and place_order " +
+      "again, which updates the order already sent.",
     input_schema: { type: "object", properties: {} },
   },
   {
@@ -174,10 +181,8 @@ export type OrderToolName = (typeof ORDER_TOOLS)[number]["name"];
 /** Asked before placing an order that has no rice, chips or noodles. */
 export const CARBS_QUESTION = "Would you like any rice or chips with that?";
 
-/** What place_order tells the model to do with its read-back. */
-const END = {
-  then: "Say the readBack to the caller exactly as it is, then end the call with end_call in the same reply.",
-} as const;
+/** Said to end a call once the order is in and the caller has nothing more. */
+export const GOODBYE = "See you soon!";
 
 /** "two Egg Fried Rice" -> "Two Egg Fried Rice." */
 function sentence(s: string): string {
@@ -193,6 +198,8 @@ export interface OrderToolDeps {
   orderingRefusal: () => Promise<string | null>;
   /** Current wait times, read fresh so a change on the board applies at once. */
   waitMinutes: () => Promise<{ collection: number; delivery: number }>;
+  /** How many times the caller has spoken: see OrderDraft.placeRefusal. */
+  turn: () => number;
   /** Every address at a postcode: see src/lib/address-lookup.ts. */
   findAddresses: (postcode: string) => Promise<LookupResult>;
   placeOrder: (input: PlaceOrderInput) => Promise<PlaceOrderResult>;
@@ -434,37 +441,50 @@ export function orderTools(deps: OrderToolDeps) {
         };
       }
 
-      case "place_order": {
-        // Placed and unchanged since: nothing to send, the same read-back stands.
+      case "confirm_order": {
+        // Placed and unchanged since: nothing to check again.
         if (draft.placed && !draft.needsSaving) {
-          const wait = await deps.waitMinutes();
-          return { success: true, orderNumber: draft.placed.number, readBack: draft.readBack(draft.type === "delivery" ? wait.delivery : wait.collection), ...END };
+          return { confirmed: true, then: "The order is already with the kitchen, unchanged. Carry on." };
         }
         const missing = draft.missing();
-        if (missing.length) return { success: false, askFor: missing, then: "Ask for these, then use place_order again." };
+        if (missing.length) return { ready: false, askFor: missing, then: "Ask for these, then use confirm_order again." };
         // Nothing to eat it with: offer rice or chips, once, now the caller
-        // has finished ordering. Not when correcting an order already sent.
+        // has finished ordering. Not when changing an order already sent.
         if (!draft.placed && !draft.hasStaple && !draft.carbsOffered) {
           draft.carbsOffered = true;
           return {
-            success: false,
+            ready: false,
             ask: CARBS_QUESTION,
             then:
               "The order has no rice, chips or noodles. Ask exactly this and nothing else. If they want some, add " +
-              "it with add_items and use place_order in the same reply, without confirming the dish. If they " +
-              "don't, use place_order straight away.",
+              "it with add_items and use confirm_order in the same reply, without confirming the dish. If they " +
+              "don't, use confirm_order straight away.",
           };
         }
         if (draft.type === "delivery") {
           const q = requote();
-          if (!q.ok) return { success: false, problem: "That address isn't in the delivery area. Offer collection." };
+          if (!q.ok) return { ready: false, problem: "That address isn't in the delivery area. Offer collection." };
           if (q.shortByPence > 0) {
             return {
-              success: false,
+              ready: false,
               problem: `Delivery needs at least ${spokenPrice(q.minOrderPence)} of food; the order is ${spokenPrice(q.shortByPence)} short. Tell the caller and ask if they would like to add something, or collect instead.`,
             };
           }
         }
+        draft.markConfirmationAsked(deps.turn());
+        return {
+          ready: true,
+          say: draft.confirmationQuestion(),
+          then: "Say this exactly and wait. If they say yes, use place_order. If not, ask what to change, change it, and use confirm_order again.",
+        };
+      }
+
+      case "place_order": {
+        if (draft.placed && !draft.needsSaving) {
+          return { success: true, orderNumber: draft.placed.number, then: "Already with the kitchen, unchanged. Carry on." };
+        }
+        const refusal = draft.placeRefusal(deps.turn());
+        if (refusal) return { success: false, error: refusal };
         const input: PlaceOrderInput = {
           type: draft.type!,
           source: "phone",
@@ -495,8 +515,8 @@ export function orderTools(deps: OrderToolDeps) {
           success: true,
           orderNumber: result.order.number,
           total: formatPence(result.order.totalPence),
-          readBack: draft.readBack(result.order.readyInMinutes),
-          ...END,
+          say: draft.priceAndTime(result.order.readyInMinutes),
+          then: `Say this exactly, then wait for them. When they say goodbye, thanks or that's all, say "${GOODBYE}" and end the call with end_call in the same reply. If they ask something, answer it.`,
         };
       }
 
@@ -565,7 +585,7 @@ export function orderTools(deps: OrderToolDeps) {
   /** A change after the order went to the kitchen: say so, so the model sends the update. */
   function afterPlacing() {
     return draft.needsSaving
-      ? { note: "The order has already gone to the kitchen. When the caller is happy, use place_order again to update it." }
+      ? { note: "The order has already gone to the kitchen. When the caller has finished changing it, use confirm_order, then place_order once they say yes, to update it." }
       : {};
   }
 

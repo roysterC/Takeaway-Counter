@@ -122,6 +122,7 @@ export async function startReceptionist(
       const fresh = await getShopConfig(organizationId);
       return { collection: fresh.collectionMinutes, delivery: fresh.deliveryMinutes };
     },
+    turn: () => engine.turns,
     findAddresses: (postcode) => lookupPostcode(postcode, { apiKey: process.env.IDEAL_POSTCODES_API_KEY }),
     placeOrder: (input) => placeOrder(organizationId, { ...input, source }, { ignoreHours }),
     amendOrder: (orderId, input) => amendOrder(organizationId, orderId, { ...input, source }),

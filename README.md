@@ -14,11 +14,11 @@ Two parts:
    `IDEAL_POSTCODES_API_KEY`), and house names are matched allowing for how
    they come through on a phone line.
    It confirms each dish with just the quantity and name ("One Chicken Chow
-   Mein."). When the caller says that's everything, it checks the order for
-   rice, chips or noodles and, if there are none, asks "Would you like any
-   rice or chips with that?" once. Then it sends the order to the
-   kitchen and reads it back with the total, the time and "See you soon!"
-   before hanging up.
+   Mein."). When the caller says that's everything it asks "Would you like
+   any rice or chips with that?" if the order has none, then reads the order
+   back ("So that's ..., for collection, is that correct?"). On "yes" it
+   sends it to the kitchen and gives the price and how long. It says "See
+   you soon!" and hangs up when the caller says goodbye or goes quiet.
    Regulars are recognised by their number ("Is that to 14 Smithy Lane
    again?"). It also tells callers where their order is, and takes messages
    for the staff.
@@ -56,13 +56,13 @@ The receptionist does the talking; the code keeps the books.
   omelettes with chips, set meals), and can be set per dish in **Menu**.
   The question is asked once, only after the caller has finished ordering,
   and never when correcting an order already sent.
-- **Corrections after the read-back.** There is no "is that right?": the
-  order goes to the kitchen when the caller says they've finished. If they
-  speak up during the read-back ("no, I said two"), the line stays open and
-  the order already sent is corrected in place, keeping its number, as long
-  as it is still New on the board (`src/lib/order-draft.ts`, `amendOrder` in
-  `src/lib/orders.ts`). Once the kitchen has started it, the change becomes a
-  message for the staff.
+- **Nothing is placed until the caller says yes.** The read-back rule is
+  enforced in code (`src/lib/order-draft.ts`): an order is only placed if it
+  is unchanged since it was read back *and* the caller has spoken since. A
+  change after placing goes through the same check and updates the order
+  already sent, keeping its number, while it is still New on the board;
+  once the kitchen has started it, the change becomes a message for the
+  staff.
 - **Nothing that was said is stored.** Each call is logged only as what it
   came to: ordered, checked an order, left a message, enquiry or hung up.
 

@@ -43,6 +43,7 @@ const TOOL_LABEL: Record<string, string> = {
   change_item: "Changed the order",
   set_order_notes: "Note for the kitchen",
   review_order: "Looked at the order so far",
+  confirm_order: "Read the order back to check",
   place_order: "Sent the order to the kitchen",
   check_order_status: "Looked up an order",
   take_message: "Took a message",

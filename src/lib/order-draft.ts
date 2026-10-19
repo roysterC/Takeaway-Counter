@@ -1,17 +1,21 @@
 /**
  * The order being taken on one call: collection or delivery, who it is for,
  * and what is in it. Held in memory for the length of the call and written to
- * the database when the caller says they have finished ordering.
+ * the database once the caller has heard it read back and said it's right.
  *
- * There is no "is that right?" before placing: the shop wants the order sent
- * as soon as the caller says that's everything, then read back with the total
- * and the time. A caller who hears a mistake in that read-back can still say
- * so, and the order is corrected rather than placed again:
+ * That rule is enforced here, not left to the prompt. A model told "read the
+ * order back before placing it" will usually do so, and now and then will
+ * place it in the same breath. So:
  *
  * - every change to the order bumps `version`;
- * - placing records the version that went to the kitchen;
- * - a change after that makes `needsSaving` true, and the next place_order
- *   updates the order already placed instead of making a second one.
+ * - confirm_order records the version it read back and the caller turn it
+ *   was in;
+ * - placing is refused unless the order is unchanged since that read-back
+ *   AND the caller has spoken since (their "yes").
+ *
+ * A change after the order has gone to the kitchen ("oh, and some chips")
+ * goes through the same read-back, then updates the order already placed
+ * instead of making a second one.
  */
 
 import type { MenuEntry } from "@/lib/menu";
@@ -60,6 +64,8 @@ export class OrderDraft {
   private placedVersion: number | null = null;
   /** "Would you like any rice or chips?" has been asked: once a call is enough. */
   carbsOffered = false;
+  /** The version read back with "is that correct?", and the caller turn it was asked in. */
+  private confirmation: { version: number; turn: number } | null = null;
 
   private touch() {
     this.version++;
@@ -205,25 +211,49 @@ export class OrderDraft {
   }
 
   /**
-   * The read-back once the order has gone to the kitchen, as the
-   * receptionist says it before putting the phone down: the dishes, how it
-   * is reaching them, the money, how long, and goodbye. Prices in words, so
-   * the voice never says "pound sign".
+   * The read-back before placing, as a question: the dishes and how they are
+   * reaching the caller, no prices. "So that's one Chicken Curry and one
+   * Boiled Rice, for collection, is that correct?"
    */
-  readBack(readyInMinutes: number): string {
+  confirmationQuestion(): string {
     const how =
       this.type === "delivery"
         ? `for delivery to ${[this.customer.addressLine1, this.customer.addressLine2, this.customer.postcode].filter(Boolean).join(", ")}`
         : "for collection";
+    return `So that's ${OrderDraft.spokenDishes(this.lines.map((l) => ({ quantity: l.quantity, name: l.item.name, notes: l.notes })))}, ${how}, is that correct?`;
+  }
+
+  /** The order, as it stands, has been read back during caller turn `turn`. */
+  markConfirmationAsked(turn: number) {
+    this.confirmation = { version: this.version, turn };
+  }
+
+  /** Why the order can't be placed yet, or null when it can. */
+  placeRefusal(turn: number): string | null {
+    if (!this.confirmation || this.confirmation.version !== this.version) {
+      return "Not placed: the order hasn't been read back as it now stands. Use confirm_order, ask if it's correct, and wait for them to say yes.";
+    }
+    if (turn <= this.confirmation.turn) {
+      return "Not placed: wait for the caller to say the order is correct before placing it.";
+    }
+    return null;
+  }
+
+  /**
+   * Said once the order has gone to the kitchen: the money and how long.
+   * Prices in words, so the voice never says "pound sign". No goodbye: the
+   * caller may have something more to say.
+   */
+  priceAndTime(readyInMinutes: number): string {
     const money =
       this.type === "delivery" && this.deliveryFeePence > 0
-        ? `That's ${spokenPrice(this.totalPence)} including ${spokenPrice(this.deliveryFeePence)} delivery, cash on delivery`
-        : `That's ${spokenPrice(this.totalPence)}, cash on ${this.type === "delivery" ? "delivery" : "collection"}`;
+        ? `That's ${spokenPrice(this.totalPence)} including ${spokenPrice(this.deliveryFeePence)} delivery, cash on delivery.`
+        : `That's ${spokenPrice(this.totalPence)}, cash on ${this.type === "delivery" ? "delivery" : "collection"}.`;
     const when =
       this.type === "delivery"
         ? `It'll be with you in about ${readyInMinutes} minutes.`
         : `It'll be ready to collect in about ${readyInMinutes} minutes.`;
-    return `So that's ${OrderDraft.spokenDishes(this.lines.map((l) => ({ quantity: l.quantity, name: l.item.name, notes: l.notes })))}, ${how}. ${money}. ${when} See you soon!`;
+    return `${money} ${when}`;
   }
 }
 

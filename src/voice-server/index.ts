@@ -42,6 +42,7 @@ async function main() {
   const { VoiceCall } = await import("@/lib/receptionist/voice/call");
   const { DeepgramStt, ElevenLabsTts, labVoiceRate } = await import("@/lib/receptionist/voice/providers");
   const { logCall } = await import("@/lib/receptionist/call-log");
+  const { GOODBYE } = await import("@/lib/receptionist/order-tools");
   const { clearFrame, mediaFrames, parseTwilioFrame } = await import("@/lib/twilio-voice");
   const fakes = FAKES ? await import("./fakes") : null;
 
@@ -207,6 +208,9 @@ async function main() {
       // The shop's greeting always plays to the end: talking over it does
       // not cut it off, and what the caller said is answered after it.
       greetingInterruptible: false,
+      // Once the order is in, silence means they have nothing more: say
+      // goodbye rather than asking if they are still there.
+      quietGoodbye: () => (session.draft.placed ? GOODBYE : null),
       out: {
         audio: (chunk) => {
           if (ws.readyState === ws.OPEN) ws.send(chunk, { binary: true });
@@ -340,6 +344,9 @@ async function main() {
       // The shop's greeting always plays to the end: talking over it does
       // not cut it off, and what the caller said is answered after it.
       greetingInterruptible: false,
+      // Once the order is in, silence means they have nothing more: say
+      // goodbye rather than asking if they are still there.
+      quietGoodbye: () => (session.draft.placed ? GOODBYE : null),
       out: {
         audio: (chunk) => {
           if (!audioOut) console.log(`[VOICE] phone call ${start.callSid}: first speech sent`);
