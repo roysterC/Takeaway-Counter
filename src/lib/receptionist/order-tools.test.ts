@@ -1,11 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 import type Anthropic from "@anthropic-ai/sdk";
 import { END_CALL_TOOL, ReceptionistEngine, type StreamingClient } from "./engine";
-import { ORDER_TOOLS, orderTools, type OrderToolDeps } from "./order-tools";
+import { CARBS_QUESTION, ORDER_TOOLS, orderTools, type OrderToolDeps } from "./order-tools";
 import { buildCallContext, buildStableSystem, greetingFor } from "./prompt";
 import { MOCK_HIXON_ZONES } from "@/lib/delivery";
+import { ADDRESSES } from "@/lib/address-lookup.fixtures";
 import { parseOpeningHours } from "@/lib/hours";
-import type { MenuEntry } from "@/lib/menu";
+import { isStapleByDefault, type MenuEntry } from "@/lib/menu";
 import type { PlaceOrderInput } from "@/lib/orders";
 
 const item = (id: string, code: string | null, name: string, pricePence: number, available = true): MenuEntry => ({
@@ -17,6 +18,7 @@ const item = (id: string, code: string | null, name: string, pricePence: number,
   available,
   aliases: [],
   category: "Test",
+  staple: isStapleByDefault(name, "Test"),
 });
 
 const MENU = [
@@ -47,6 +49,7 @@ function setup(over: Partial<OrderToolDeps> = {}) {
     },
     recentOrders: async () => [],
     saveMessage: vi.fn(async () => "m1"),
+    findAddresses: async () => ({ ok: true, addresses: ADDRESSES }),
     ...over,
   };
   const tools = orderTools(deps);
@@ -112,6 +115,7 @@ describe("taking an order", () => {
     await t.execute("set_order_type", { type: "collection" });
     await t.execute("set_customer_details", { name: "Dave" });
     await t.execute("add_items", { items: [{ code: "94", quantity: 1 }] });
+    await t.execute("place_order", {}); // "Would you like any rice or chips?" "No thanks."
     await t.execute("place_order", {});
     // "No, I said two."
     const changed = (await t.execute("change_item", { line: 1, quantity: 2 })) as { note?: string };
@@ -130,9 +134,122 @@ describe("taking an order", () => {
     await t.execute("set_order_type", { type: "collection" });
     await t.execute("set_customer_details", { name: "Dave" });
     await t.execute("add_items", { items: [{ code: "94", quantity: 1 }] });
+    await t.execute("place_order", {}); // the rice question
     await t.execute("place_order", {});
     await t.execute("add_items", { items: [{ code: "170", quantity: 1 }] });
     expect(await t.execute("place_order", {})).toMatchObject({ success: false, then: expect.stringContaining("take a message") });
+  });
+
+  it("offers rice or chips once, when the caller has finished and ordered none", async () => {
+    const t = setup();
+    await t.execute("set_order_type", { type: "collection" });
+    await t.execute("set_customer_details", { name: "Dave" });
+    // While ordering, nothing is offered: just the dish.
+    const added = (await t.execute("add_items", { items: [{ code: "94", quantity: 1 }] })) as Record<string, unknown>;
+    expect(added).not.toHaveProperty("ask");
+    expect(added.say).toBe("One Sweet & Sour Chicken Hong Kong Style.");
+
+    // "That's everything": asked instead of placed.
+    expect(await t.execute("place_order", {})).toMatchObject({ success: false, ask: CARBS_QUESTION });
+    expect(t.placed).toHaveLength(0);
+
+    // "Yes, an egg fried rice": added and placed, with no second question.
+    await t.execute("add_items", { items: [{ code: "170", quantity: 1 }] });
+    const placed = (await t.execute("place_order", {})) as { success: boolean; readBack: string };
+    expect(placed.success).toBe(true);
+    expect(placed.readBack).toContain("one Sweet & Sour Chicken Hong Kong Style and one Egg Fried Rice");
+    expect(t.placed[0].lines.map((l) => l.menuItemId)).toEqual(["ss", "efr"]);
+  });
+
+  it("places on 'no thanks' without asking again", async () => {
+    const t = setup();
+    await t.execute("set_order_type", { type: "collection" });
+    await t.execute("set_customer_details", { name: "Dave" });
+    await t.execute("add_items", { items: [{ code: "94", quantity: 1 }] });
+    expect(await t.execute("place_order", {})).toMatchObject({ ask: CARBS_QUESTION });
+    expect(await t.execute("place_order", {})).toMatchObject({ success: true });
+    expect(t.placed).toHaveLength(1);
+  });
+
+  it("does not offer rice or chips when the order already has some", async () => {
+    const t = setup();
+    await t.execute("set_order_type", { type: "collection" });
+    await t.execute("set_customer_details", { name: "Dave" });
+    await t.execute("add_items", { items: [{ code: "94", quantity: 1 }, { code: "147", quantity: 1 }] });
+    expect(await t.execute("place_order", {})).toMatchObject({ success: true });
+  });
+
+  it("asks for missing details before the rice question", async () => {
+    const t = setup();
+    await t.execute("set_order_type", { type: "collection" });
+    await t.execute("add_items", { items: [{ code: "94", quantity: 1 }] });
+    expect(await t.execute("place_order", {})).toMatchObject({ success: false, askFor: ["the caller's name"] });
+    await t.execute("set_customer_details", { name: "Dave" });
+    expect(await t.execute("place_order", {})).toMatchObject({ ask: CARBS_QUESTION });
+  });
+
+  it("finds a new customer's address from their postcode and house number", async () => {
+    const lookups: string[] = [];
+    const t = setup({
+      findAddresses: async (pc) => {
+        lookups.push(pc);
+        return { ok: true, addresses: ADDRESSES };
+      },
+    });
+    await t.execute("set_order_type", { type: "delivery" });
+    const found = (await t.execute("find_address", { postcode: "st18 0pq" })) as Record<string, unknown>;
+    expect(lookups).toEqual(["ST18 0PQ"]);
+    expect(found).toMatchObject({ found: true, addresses: 7, streets: ["Smithy Lane", "Church Road"], deliveryCharge: "one pound fifty" });
+    expect(found.then).toContain("and the street");
+
+    const chosen = (await t.execute("choose_address", { house: "12" })) as Record<string, unknown>;
+    expect(chosen).toMatchObject({ ok: true, address: "12 Smithy Lane, Hixon" });
+    expect(t.draft.customer).toMatchObject({ addressLine1: "12 Smithy Lane", addressLine2: "Hixon", town: "Stafford", postcode: "ST18 0PQ" });
+
+    await t.execute("set_customer_details", { name: "Sam" });
+    await t.execute("add_items", { items: [{ code: "147", quantity: 3 }] });
+    const placed = (await t.execute("place_order", {})) as { readBack: string };
+    expect(placed.readBack).toContain("for delivery to 12 Smithy Lane, Hixon, ST18 0PQ");
+    expect(t.placed[0].customer).toMatchObject({ addressLine1: "12 Smithy Lane", addressLine2: "Hixon", town: "Stafford", postcode: "ST18 0PQ" });
+  });
+
+  it("asks which one when the house number fits more than one address", async () => {
+    const t = setup();
+    await t.execute("find_address", { postcode: "ST18 0PQ" });
+    expect(await t.execute("choose_address", { house: "16" })).toMatchObject({
+      ok: false,
+      options: ["Flat 1, 16 Smithy Lane, Hixon", "Flat 2, 16 Smithy Lane, Hixon"],
+    });
+    expect(await t.execute("choose_address", { house: "99" })).toMatchObject({ ok: false, problem: expect.stringContaining("no 99") });
+    expect(t.draft.customer.addressLine1).toBeNull();
+  });
+
+  it("doesn't look up a postcode outside the delivery area", async () => {
+    const findAddresses = vi.fn(async () => ({ ok: true as const, addresses: ADDRESSES }));
+    const t = setup({ findAddresses });
+    expect(await t.execute("find_address", { postcode: "B5 4BU" })).toMatchObject({ found: false, problem: expect.stringContaining("offer collection") });
+    expect(findAddresses).not.toHaveBeenCalled();
+  });
+
+  it("falls back to asking for the street when the search isn't set up", async () => {
+    const t = setup({ findAddresses: async () => ({ ok: false, reason: "not_configured" }) });
+    expect(await t.execute("find_address", { postcode: "ST18 0PQ" })).toMatchObject({
+      found: false,
+      then: expect.stringContaining("house number and street"),
+    });
+    // The postcode is kept: only the first line is still needed.
+    expect(t.draft.customer.postcode).toBe("ST18 0PQ");
+  });
+
+  it("offers the provider's suggestions for a postcode it can't find", async () => {
+    const t = setup({ findAddresses: async () => ({ ok: false, reason: "not_found", suggestions: ["ST18 0PP"] }) });
+    expect(await t.execute("find_address", { postcode: "ST18 0PX" })).toMatchObject({ found: false, didTheyMean: ["ST18 0PP"] });
+  });
+
+  it("takes the only address at a postcode without asking for a number", async () => {
+    const t = setup({ findAddresses: async () => ({ ok: true, addresses: [ADDRESSES[4]] }) });
+    expect(await t.execute("find_address", { postcode: "ST18 0PQ" })).toMatchObject({ found: true, address: "Rose Cottage, Smithy Lane, Hixon" });
+    expect(t.draft.customer.addressLine1).toBe("Rose Cottage");
   });
 
   it("asks rather than guesses when a number covers a choice", async () => {
@@ -307,6 +424,7 @@ describe("a whole call through the engine", () => {
       },
       recentOrders: async () => [],
       saveMessage: async () => "m",
+      findAddresses: async () => ({ ok: false, reason: "not_configured" }),
     });
     const readBack =
       "So that's one Sweet & Sour Chicken Hong Kong Style and one Egg Fried Rice, for collection. " +

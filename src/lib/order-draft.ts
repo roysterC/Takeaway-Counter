@@ -58,6 +58,8 @@ export class OrderDraft {
   placed: { orderId: string; number: number } | null = null;
   /** The version that went to the kitchen. */
   private placedVersion: number | null = null;
+  /** "Would you like any rice or chips?" has been asked: once a call is enough. */
+  carbsOffered = false;
 
   private touch() {
     this.version++;
@@ -178,6 +180,11 @@ export class OrderDraft {
     return out;
   }
 
+  /** Something on the order is, or comes with, rice, chips or noodles. */
+  get hasStaple(): boolean {
+    return this.lines.some((l) => l.item.staple);
+  }
+
   /** The order, as it stands, has gone to the kitchen as `number`. */
   markPlaced(orderId: string, number: number) {
     this.placed = { orderId, number };
@@ -206,7 +213,7 @@ export class OrderDraft {
   readBack(readyInMinutes: number): string {
     const how =
       this.type === "delivery"
-        ? `for delivery to ${[this.customer.addressLine1, this.customer.postcode].filter(Boolean).join(", ")}`
+        ? `for delivery to ${[this.customer.addressLine1, this.customer.addressLine2, this.customer.postcode].filter(Boolean).join(", ")}`
         : "for collection";
     const money =
       this.type === "delivery" && this.deliveryFeePence > 0

@@ -18,6 +18,7 @@ import { normalisePostcode, quoteDelivery, type DeliveryRules } from "@/lib/deli
 import { formatPence, spokenPrice } from "@/lib/money";
 import { normalisePhone, speakablePhone } from "@/lib/phone";
 import type { PlaceOrderInput, PlaceOrderResult } from "@/lib/orders";
+import { matchAddress, type FoundAddress, type LookupResult } from "@/lib/address-lookup";
 
 export const ORDER_TOOLS: Anthropic.Tool[] = [
   {
@@ -49,6 +50,33 @@ export const ORDER_TOOLS: Anthropic.Tool[] = [
         postcode: { type: "string", description: "UK postcode, e.g. 'ST18 0PP'." },
         deliveryNotes: { type: "string", description: "Directions for the driver, e.g. 'side door'." },
       },
+    },
+  },
+  {
+    name: "find_address",
+    description:
+      "For a delivery to someone whose address you don't have: look up their postcode. Checks it is in the " +
+      "delivery area and finds every address there. Then ask for their house number or name and use " +
+      "choose_address.",
+    input_schema: {
+      type: "object",
+      properties: { postcode: { type: "string", description: "UK postcode, e.g. 'ST18 0PP'." } },
+      required: ["postcode"],
+    },
+  },
+  {
+    name: "choose_address",
+    description:
+      "Pick the caller's address from the postcode just looked up with find_address, by what they said: a " +
+      "house number ('14', '2a'), a house name ('Rose Cottage') or a flat ('flat 2, 14'). Add the street only " +
+      "if the postcode covers more than one. Records it as the delivery address.",
+    input_schema: {
+      type: "object",
+      properties: {
+        house: { type: "string", description: "House number or name, and flat if any, as the caller said it." },
+        street: { type: "string" },
+      },
+      required: ["house"],
     },
   },
   {
@@ -111,7 +139,8 @@ export const ORDER_TOOLS: Anthropic.Tool[] = [
     description:
       "Send the order to the kitchen. Use it as soon as the caller says they have finished ordering " +
       "(\"that's everything\", \"that's all\", \"no, that's it\"). If anything is still needed, such as their " +
-      "name or address, you are told what to ask for instead. On success, say the readBack exactly as given " +
+      "name or address, or the order has no rice or chips, you are told what to ask instead. On success, say " +
+      "the readBack exactly as given " +
       "and end the call in the same reply. If the caller then corrects something, change the order and use " +
       "place_order again: it updates the order already sent rather than sending a second one.",
     input_schema: { type: "object", properties: {} },
@@ -142,6 +171,9 @@ export const ORDER_TOOLS: Anthropic.Tool[] = [
 
 export type OrderToolName = (typeof ORDER_TOOLS)[number]["name"];
 
+/** Asked before placing an order that has no rice, chips or noodles. */
+export const CARBS_QUESTION = "Would you like any rice or chips with that?";
+
 /** What place_order tells the model to do with its read-back. */
 const END = {
   then: "Say the readBack to the caller exactly as it is, then end the call with end_call in the same reply.",
@@ -161,6 +193,8 @@ export interface OrderToolDeps {
   orderingRefusal: () => Promise<string | null>;
   /** Current wait times, read fresh so a change on the board applies at once. */
   waitMinutes: () => Promise<{ collection: number; delivery: number }>;
+  /** Every address at a postcode: see src/lib/address-lookup.ts. */
+  findAddresses: (postcode: string) => Promise<LookupResult>;
   placeOrder: (input: PlaceOrderInput) => Promise<PlaceOrderResult>;
   /** Correct the order placed earlier on this call, while the kitchen hasn't started it. */
   amendOrder: (orderId: string, input: PlaceOrderInput) => Promise<PlaceOrderResult>;
@@ -184,6 +218,8 @@ export function orderTools(deps: OrderToolDeps) {
   let messageBody = "";
   let messageName: string | null = null;
   let messagePhone: string | null = deps.callerNumber;
+  // The addresses at the postcode the caller gave, for choose_address.
+  let found: FoundAddress[] = [];
 
   const s = (v: unknown) => (typeof v === "string" ? v : undefined);
 
@@ -250,6 +286,71 @@ export function orderTools(deps: OrderToolDeps) {
           result.deliveryArea = q.zone;
         }
         return { ...result, ...afterPlacing() };
+      }
+
+      case "find_address": {
+        if (!deps.delivery.enabled) return { error: "The shop isn't delivering at the moment. Offer collection instead." };
+        const pc = normalisePostcode(s(input.postcode));
+        if (!pc) return { error: "That isn't a postcode. Ask the caller to say it again, letter by letter." };
+        if (!pc.full) return { error: "That's only the start of a postcode. Ask for the whole postcode." };
+        if (draft.type !== "delivery") draft.setType("delivery");
+        // A postcode moves the delivery somewhere else: the old address goes.
+        if (draft.customer.postcode !== pc.postcode) {
+          draft.setCustomer({ postcode: pc.postcode, addressLine1: null, addressLine2: null, town: null });
+        }
+        found = [];
+        // Outside the area: no need to look it up at all.
+        const q = requote();
+        if (!q.ok) return { found: false, problem: `We don't deliver to ${pc.postcode}. Apologise and offer collection instead.` };
+        const lookup = await deps.findAddresses(pc.postcode);
+        if (!lookup.ok) {
+          if (lookup.reason === "not_found") {
+            return {
+              found: false,
+              problem: `${pc.postcode} isn't a postcode we can find. Read it back to check it.`,
+              ...(lookup.suggestions.length ? { didTheyMean: lookup.suggestions.slice(0, 3) } : {}),
+            };
+          }
+          return {
+            found: false,
+            then: "The address search isn't available. Ask for the house number and street, and record them with set_customer_details.",
+            deliveryCharge: q.feePence ? spokenPrice(q.feePence) : "free",
+          };
+        }
+        found = lookup.addresses;
+        if (found.length === 1) {
+          setAddress(found[0]);
+          return { found: true, address: spokenAddress(found[0]), then: "There is only one address at this postcode. Check it with the caller in a few words." };
+        }
+        const streets = [...new Set(found.map((a) => a.street).filter(Boolean))];
+        return {
+          found: true,
+          addresses: found.length,
+          streets: streets.slice(0, 6),
+          deliveryCharge: q.feePence ? spokenPrice(q.feePence) : "free",
+          then: "Ask for their house number or name" + (streets.length > 1 ? ", and the street" : "") + ", then use choose_address.",
+        };
+      }
+
+      case "choose_address": {
+        if (!found.length) return { error: "Look the postcode up with find_address first." };
+        const match = matchAddress(found, { house: s(input.house) ?? "", street: s(input.street) });
+        if (match.kind === "none") {
+          return {
+            ok: false,
+            problem: `There's no ${s(input.house)} at ${draft.customer.postcode}. Ask them to say the house number again; if it still isn't found, take the first line of the address as they say it and record it with set_customer_details.`,
+          };
+        }
+        if (match.kind === "choose") {
+          return { ok: false, problem: "More than one address fits. Ask which one.", options: match.options.map(spokenAddress) };
+        }
+        setAddress(match.address);
+        return {
+          ok: true,
+          address: spokenAddress(match.address),
+          then: "Say the address back in a few words, then carry on.",
+          ...afterPlacing(),
+        };
       }
 
       case "add_items": {
@@ -331,6 +432,19 @@ export function orderTools(deps: OrderToolDeps) {
         }
         const missing = draft.missing();
         if (missing.length) return { success: false, askFor: missing, then: "Ask for these, then use place_order again." };
+        // Nothing to eat it with: offer rice or chips, once, now the caller
+        // has finished ordering. Not when correcting an order already sent.
+        if (!draft.placed && !draft.hasStaple && !draft.carbsOffered) {
+          draft.carbsOffered = true;
+          return {
+            success: false,
+            ask: CARBS_QUESTION,
+            then:
+              "The order has no rice, chips or noodles. Ask exactly this and nothing else. If they want some, add " +
+              "it with add_items and use place_order in the same reply, without confirming the dish. If they " +
+              "don't, use place_order straight away.",
+          };
+        }
         if (draft.type === "delivery") {
           const q = requote();
           if (!q.ok) return { success: false, problem: "That address isn't in the delivery area. Offer collection." };
@@ -406,6 +520,17 @@ export function orderTools(deps: OrderToolDeps) {
       default:
         return { error: `There is no tool called ${name}.` };
     }
+  }
+
+  /** A looked-up address becomes the delivery address. */
+  function setAddress(a: FoundAddress) {
+    draft.setCustomer({ addressLine1: a.line1, addressLine2: a.line2, town: a.town, postcode: a.postcode || draft.customer.postcode });
+    requote();
+  }
+
+  /** "14 Smithy Lane, Hixon": how the address is said back. */
+  function spokenAddress(a: FoundAddress) {
+    return [a.line1, a.line2].filter(Boolean).join(", ");
   }
 
   /** Re-quote delivery for the current address and food, and keep the fee on the draft. */

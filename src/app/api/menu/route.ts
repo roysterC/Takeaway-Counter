@@ -13,6 +13,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { requireTenant, isErrorResponse } from "@/lib/tenant";
 import { menuItemInput } from "@/lib/menu-input";
+import { isStapleByDefault } from "@/lib/menu";
 
 export async function GET(req: NextRequest) {
   const ctx = await requireTenant(req, { members: true });
@@ -36,6 +37,9 @@ export async function GET(req: NextRequest) {
         pricePence: i.pricePence,
         available: i.available,
         aliases: i.aliases,
+        // What the owner set, or null for automatic, and what that comes to.
+        staple: i.staple,
+        stapleAuto: isStapleByDefault(i.name, c.name),
         categoryId: c.id,
       })),
     })),
@@ -80,6 +84,7 @@ export async function POST(req: NextRequest) {
         code: parsed.data.code ?? null,
         description: parsed.data.description ?? null,
         aliases: parsed.data.aliases ?? [],
+        staple: parsed.data.staple ?? null,
         available: parsed.data.available ?? true,
         sortOrder: (last._max.sortOrder ?? -1) + 1,
       },

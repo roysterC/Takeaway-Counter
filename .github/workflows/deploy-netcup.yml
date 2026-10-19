@@ -200,7 +200,7 @@ jobs:
 
             # Says what is missing for the phone line rather than leaving it to
             # the first caller. Settings are checked by name only, never shown.
-            for setting in ANTHROPIC_API_KEY RECEPTIONIST_VOICE_SECRET RECEPTIONIST_VOICE_URL DEEPGRAM_API_KEY ELEVENLABS_API_KEY TWILIO_AUTH_TOKEN; do
+            for setting in ANTHROPIC_API_KEY RECEPTIONIST_VOICE_SECRET RECEPTIONIST_VOICE_URL DEEPGRAM_API_KEY ELEVENLABS_API_KEY TWILIO_AUTH_TOKEN IDEAL_POSTCODES_API_KEY; do
               as_deploy "grep -qsE '^${setting}=.+' .env .env.local" \
                 || echo "WARNING: $setting is not set in $APP_DIR/.env; the phone receptionist will not work until it is" >&2
             done
