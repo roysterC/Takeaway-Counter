@@ -12,7 +12,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { prisma } from "@/lib/prisma";
 import { getMenu, getShopConfig } from "@/lib/shop";
 import { openStatus, spokenNextOpen, spokenTime, zonedNow } from "@/lib/hours";
-import { placeOrder, recentOrdersFor, spokenStatus } from "@/lib/orders";
+import { amendOrder, placeOrder, recentOrdersFor, spokenStatus } from "@/lib/orders";
 import { formatPence } from "@/lib/money";
 import { END_CALL_TOOL, ReceptionistEngine, type StreamingClient } from "./engine";
 import { ORDER_TOOLS, orderTools } from "./order-tools";
@@ -108,7 +108,6 @@ export async function startReceptionist(
     menu: menu.flatMap((s) => s.items),
     delivery: shop.delivery,
     callerNumber: opts.callerNumber,
-    turn: () => engine.turns,
     orderingRefusal: async () => {
       const fresh = await getShopConfig(organizationId);
       if (!fresh.acceptingOrders) return "The shop has paused phone orders for now.";
@@ -123,6 +122,7 @@ export async function startReceptionist(
       return { collection: fresh.collectionMinutes, delivery: fresh.deliveryMinutes };
     },
     placeOrder: (input) => placeOrder(organizationId, { ...input, source }, { ignoreHours }),
+    amendOrder: (orderId, input) => amendOrder(organizationId, orderId, { ...input, source }),
     recentOrders: async (phone) => {
       const orders = await recentOrdersFor(organizationId, phone);
       return orders.map((o) => {

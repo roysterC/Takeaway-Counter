@@ -107,9 +107,8 @@ export class ReceptionistEngine {
   readonly messages: Anthropic.MessageParam[] = [];
 
   /**
-   * How many times the caller has spoken. Tools read it to tell whether the
-   * caller has answered since something was put to them: an order is only
-   * placed after a read-back the caller has replied to.
+   * How many times the caller has spoken. Tools can read it to tell whether
+   * the caller has answered since something was put to them.
    */
   turns = 0;
 

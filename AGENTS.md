@@ -9,9 +9,11 @@ This version has breaking changes — APIs, conventions, and file structure may 
   from call-assistant and are deliberately kept close to it, so fixes can be
   carried across; the takeaway parts are `order-tools.ts` (the tools and what
   they do), `prompt.ts` and `session.ts`.
-- `src/lib/order-draft.ts` — the order taken on one call, and the read-back
-  rule: an order is only placed once it has been read back unchanged and the
-  caller has spoken since. Keep that rule in code, not in the prompt.
+- `src/lib/order-draft.ts` — the order taken on one call. It is placed when
+  the caller says they've finished (no "is that right?", at the shop's
+  request) and read back afterwards; a correction made after placing updates
+  the same order (`amendOrder`) while it is still New, never a second one.
+  Keep that rule in code, not in the prompt.
 - `src/lib/orders.ts` — placing an order (phone and counter share it). Prices,
   availability and delivery fees are re-checked against the database there.
 - `src/lib/delivery.ts`, `src/lib/hours.ts`, `src/lib/menu.ts`, `src/lib/money.ts` —

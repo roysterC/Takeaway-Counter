@@ -55,8 +55,9 @@ export const ORDER_TOOLS: Anthropic.Tool[] = [
     name: "add_items",
     description:
       "Add dishes to the order. Use the menu number as the code whenever you know it, and the dish name as " +
-      "well. Add everything the caller has just asked for in one call. If a dish needs a choice (quarter or " +
-      "half, chicken or beef) or cannot be found, nothing is added for it and you are told what to ask.",
+      "well. Add everything the caller has just asked for in one call. The result's `say` is how to confirm " +
+      "it, e.g. \"One Chicken Chow Mein.\" If a dish needs a choice (quarter or half, chicken or beef) or " +
+      "cannot be found, nothing is added for it and you are told what to ask.",
     input_schema: {
       type: "object",
       properties: {
@@ -81,7 +82,7 @@ export const ORDER_TOOLS: Anthropic.Tool[] = [
     name: "change_item",
     description:
       "Change or remove a line already on the order, by its line number from the latest order summary. " +
-      "Quantity 0 removes it.",
+      "Quantity 0 removes it. Fine after the order has been placed too: use place_order again afterwards.",
     input_schema: {
       type: "object",
       properties: {
@@ -101,15 +102,18 @@ export const ORDER_TOOLS: Anthropic.Tool[] = [
   {
     name: "review_order",
     description:
-      "Get the order read-back once the caller has finished ordering. Read the readBack text to the caller and " +
-      "ask if it is all correct. If something is still missing you are told what to ask for instead.",
+      "What is on the order so far and what it comes to. Only for when the caller asks (\"what have I got?\", " +
+      "\"how much is that?\"); do not read the order back otherwise until it is placed.",
     input_schema: { type: "object", properties: {} },
   },
   {
     name: "place_order",
     description:
-      "Send the order to the kitchen. Only after you have read the order back with review_order and the caller " +
-      "has said it is right. Never in the same reply as the read-back.",
+      "Send the order to the kitchen. Use it as soon as the caller says they have finished ordering " +
+      "(\"that's everything\", \"that's all\", \"no, that's it\"). If anything is still needed, such as their " +
+      "name or address, you are told what to ask for instead. On success, say the readBack exactly as given " +
+      "and end the call in the same reply. If the caller then corrects something, change the order and use " +
+      "place_order again: it updates the order already sent rather than sending a second one.",
     input_schema: { type: "object", properties: {} },
   },
   {
@@ -121,7 +125,8 @@ export const ORDER_TOOLS: Anthropic.Tool[] = [
     name: "take_message",
     description:
       "Leave a message for the shop's staff: a complaint, a question you cannot answer (such as an allergy " +
-      "question), someone asking for the owner, or a change to an order already placed. Use it as soon as you " +
+      "question), someone asking for the owner, or a change to an order placed on an earlier call or already " +
+      "being cooked. Use it as soon as you " +
       "have their name and what it is about. Sending it again in the same call adds to the same message.",
     input_schema: {
       type: "object",
@@ -137,18 +142,28 @@ export const ORDER_TOOLS: Anthropic.Tool[] = [
 
 export type OrderToolName = (typeof ORDER_TOOLS)[number]["name"];
 
+/** What place_order tells the model to do with its read-back. */
+const END = {
+  then: "Say the readBack to the caller exactly as it is, then end the call with end_call in the same reply.",
+} as const;
+
+/** "two Egg Fried Rice" -> "Two Egg Fried Rice." */
+function sentence(s: string): string {
+  return `${s.charAt(0).toUpperCase()}${s.slice(1)}.`;
+}
+
 export interface OrderToolDeps {
   menu: MenuEntry[];
   delivery: DeliveryRules;
   /** Caller ID, E.164; null when withheld. */
   callerNumber: string | null;
-  /** How many times the caller has spoken: see OrderDraft.placeRefusal. */
-  turn: () => number;
   /** Null when orders can be taken now; otherwise what to tell the caller. */
   orderingRefusal: () => Promise<string | null>;
   /** Current wait times, read fresh so a change on the board applies at once. */
   waitMinutes: () => Promise<{ collection: number; delivery: number }>;
   placeOrder: (input: PlaceOrderInput) => Promise<PlaceOrderResult>;
+  /** Correct the order placed earlier on this call, while the kitchen hasn't started it. */
+  amendOrder: (orderId: string, input: PlaceOrderInput) => Promise<PlaceOrderResult>;
   recentOrders: (phone: string) => Promise<
     Array<{ number: number; type: string; status: string; promisedAt: Date | null; spokenStatus: string; spokenTime: string | null }>
   >;
@@ -192,6 +207,7 @@ export function orderTools(deps: OrderToolDeps) {
               }
             : {}),
           order: draft.summary(),
+          ...afterPlacing(),
         };
       }
 
@@ -233,13 +249,12 @@ export function orderTools(deps: OrderToolDeps) {
           result.deliveryCharge = q.feePence ? spokenPrice(q.feePence) : "free";
           result.deliveryArea = q.zone;
         }
-        return result;
+        return { ...result, ...afterPlacing() };
       }
 
       case "add_items": {
         const refusal = await deps.orderingRefusal();
         if (refusal) return { error: `${refusal} Do not take an order.` };
-        if (draft.placed) return { error: placedAlready() };
         const asked = Array.isArray(input.items) ? input.items : [];
         if (!asked.length) return { error: "No dishes were given." };
         const results = asked.slice(0, 20).map((raw) => {
@@ -262,18 +277,28 @@ export function orderTools(deps: OrderToolDeps) {
           }
           const qty = typeof it.quantity === "number" ? it.quantity : 1;
           try {
-            const { line, quantity } = draft.addItem(match.item, qty, s(it.notes) ?? null);
-            return { asked: label, added: true, line, quantity, ...itemForTool(match.item) };
+            const notes = s(it.notes) ?? null;
+            const before = draft.lines.find((l) => l.item.id === match.item.id && l.notes === (notes?.trim() || null))?.quantity ?? 0;
+            const { line, quantity } = draft.addItem(match.item, qty, notes);
+            return { asked: label, added: true, line, quantity, addedNow: quantity - before, notes, ...itemForTool(match.item) };
           } catch (err) {
             return { asked: label, added: false, problem: err instanceof Error ? err.message : String(err) };
           }
         });
         if (draft.type === "delivery" && draft.customer.postcode) requote();
-        return { results, order: draft.summary() };
+        const added = results.flatMap((r) =>
+          "addedNow" in r && r.addedNow ? [{ quantity: r.addedNow, name: r.name, notes: r.notes }] : []
+        );
+        return {
+          results,
+          // All the caller needs to hear back: the quantity and the dish, no price.
+          ...(added.length ? { say: sentence(OrderDraft.spokenDishes(added)) } : {}),
+          order: draft.summary(),
+          ...afterPlacing(),
+        };
       }
 
       case "change_item": {
-        if (draft.placed) return { error: placedAlready() };
         const line = typeof input.line === "number" ? input.line : NaN;
         if (!draft.lines[line - 1]) return { error: `There is no line ${input.line}. The order has ${draft.lines.length} lines.`, order: draft.summary() };
         draft.changeLine(line, {
@@ -281,45 +306,42 @@ export function orderTools(deps: OrderToolDeps) {
           notes: input.notes === undefined ? undefined : (s(input.notes) ?? null),
         });
         if (draft.type === "delivery" && draft.customer.postcode) requote();
-        return { ok: true, order: draft.summary() };
+        return { ok: true, order: draft.summary(), ...afterPlacing() };
       }
 
       case "set_order_notes": {
-        if (draft.placed) return { error: placedAlready() };
         draft.setNotes(s(input.notes) ?? null);
-        return { ok: true, notes: draft.notes };
+        return { ok: true, notes: draft.notes, ...afterPlacing() };
       }
 
       case "review_order": {
-        if (draft.placed) return { error: placedAlready() };
-        const missing = draft.missing();
-        if (missing.length) return { ready: false, askFor: missing, order: draft.summary() };
-        if (draft.type === "delivery") {
-          const q = requote();
-          if (!q.ok) return { ready: false, problem: "That address isn't in the delivery area. Offer collection.", order: draft.summary() };
-          if (q.shortByPence > 0) {
-            return {
-              ready: false,
-              problem: `Delivery needs at least ${spokenPrice(q.minOrderPence)} of food; the order is ${spokenPrice(q.shortByPence)} short. Tell the caller and ask if they would like to add something, or collect instead.`,
-              order: draft.summary(),
-            };
-          }
-        }
-        const wait = await deps.waitMinutes();
-        draft.markReviewed(deps.turn());
         return {
-          ready: true,
-          readBack: draft.readBack(draft.type === "delivery" ? wait.delivery : wait.collection),
-          then: "Read this to the caller and ask if everything is correct. Place the order only once they say yes.",
+          dishes: draft.lines.length ? OrderDraft.spokenDishes(draft.lines.map((l) => ({ quantity: l.quantity, name: l.item.name, notes: l.notes }))) : "nothing yet",
+          ...(draft.type === "delivery" ? { deliveryCharge: spokenPrice(draft.deliveryFeePence) } : {}),
+          spokenTotal: spokenPrice(draft.totalPence),
           order: draft.summary(),
-          ...(draft.notes ? { kitchenNote: draft.notes } : {}),
         };
       }
 
       case "place_order": {
-        const refusal = draft.placeRefusal(deps.turn());
-        if (refusal) return { error: refusal };
-        const result = await deps.placeOrder({
+        // Placed and unchanged since: nothing to send, the same read-back stands.
+        if (draft.placed && !draft.needsSaving) {
+          const wait = await deps.waitMinutes();
+          return { success: true, orderNumber: draft.placed.number, readBack: draft.readBack(draft.type === "delivery" ? wait.delivery : wait.collection), ...END };
+        }
+        const missing = draft.missing();
+        if (missing.length) return { success: false, askFor: missing, then: "Ask for these, then use place_order again." };
+        if (draft.type === "delivery") {
+          const q = requote();
+          if (!q.ok) return { success: false, problem: "That address isn't in the delivery area. Offer collection." };
+          if (q.shortByPence > 0) {
+            return {
+              success: false,
+              problem: `Delivery needs at least ${spokenPrice(q.minOrderPence)} of food; the order is ${spokenPrice(q.shortByPence)} short. Tell the caller and ask if they would like to add something, or collect instead.`,
+            };
+          }
+        }
+        const input: PlaceOrderInput = {
           type: draft.type!,
           source: "phone",
           customer: {
@@ -333,19 +355,24 @@ export function orderTools(deps: OrderToolDeps) {
           },
           lines: draft.lines.map((l) => ({ menuItemId: l.item.id, quantity: l.quantity, notes: l.notes })),
           notes: draft.notes,
-        });
-        if (!result.ok) return { success: false, error: result.message, then: "Tell the caller plainly; do not say the order is in." };
-        draft.placed = { orderId: result.order.id, number: result.order.number };
+        };
+        const result = draft.placed ? await deps.amendOrder(draft.placed.orderId, input) : await deps.placeOrder(input);
+        if (!result.ok) {
+          return {
+            success: false,
+            error: result.message,
+            then: draft.placed
+              ? "Tell the caller plainly, and take a message so the staff can sort out the change."
+              : "Tell the caller plainly; do not say the order is in.",
+          };
+        }
+        draft.markPlaced(result.order.id, result.order.number);
         return {
           success: true,
           orderNumber: result.order.number,
           total: formatPence(result.order.totalPence),
-          spokenTotal: spokenPrice(result.order.totalPence),
-          readyInMinutes: result.order.readyInMinutes,
-          then:
-            draft.type === "delivery"
-              ? "Tell them the order is in and roughly how long it will be, and that it's cash on delivery. Then ask if there's anything else."
-              : "Tell them the order is in and when to come and collect it, and that it's cash on collection. Then ask if there's anything else.",
+          readBack: draft.readBack(result.order.readyInMinutes),
+          ...END,
         };
       }
 
@@ -400,8 +427,11 @@ export function orderTools(deps: OrderToolDeps) {
     };
   }
 
-  function placedAlready() {
-    return `Order number ${draft.placed!.number} has already gone to the kitchen and can't be changed from here. Take a message so the staff can change it.`;
+  /** A change after the order went to the kitchen: say so, so the model sends the update. */
+  function afterPlacing() {
+    return draft.needsSaving
+      ? { note: "The order has already gone to the kitchen. When the caller is happy, use place_order again to update it." }
+      : {};
   }
 
   return { draft, execute };
