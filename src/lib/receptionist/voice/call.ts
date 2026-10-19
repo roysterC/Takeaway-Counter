@@ -9,7 +9,9 @@
  *   the end of it, so the silence is the model's time to its first sentence.
  * - What if they talk over it? The reply stops, queued audio is dropped, the
  *   listener is told to throw away what it has buffered, and what they said
- *   becomes the next turn.
+ *   becomes the next turn. The greeting can be made exempt
+ *   (greetingInterruptible), in which case it always plays to the end and
+ *   what they said is answered after it.
  * - What fills the gap while the diary is read? A few words, if the model has
  *   not already said some.
  * - When to put the phone down? When the receptionist ends the call, once its
@@ -79,6 +81,13 @@ export interface VoiceCallDeps {
    * there, and then before the call is ended. Null turns the check off.
    */
   silence?: { promptMs: number; hangupMs: number } | null;
+  /**
+   * Whether the caller can talk over the greeting. True by default, as for
+   * any reply. False plays the greeting through to the end whatever is said
+   * over it: nothing they say stops it or clears its audio, and once it has
+   * finished, what they said is answered as their first turn.
+   */
+  greetingInterruptible?: boolean;
 }
 
 export const SILENCE_PROMPT = "Are you still there?";
@@ -138,6 +147,10 @@ export class VoiceCall {
   private hangingUp = false;
   /** The receptionist put the phone down (after a goodbye), not the caller. */
   private endedByReceptionist = false;
+  /** The greeting is still playing and may not be talked over: see greetingInterruptible. */
+  private greetingLocked = false;
+  /** The caller finished speaking while the greeting was locked; answered once it ends. */
+  private turnWaiting = false;
 
   readonly log: Array<{ who: "caller" | "assistant"; text: string }> = [];
   turns: TurnResult[] = [];
@@ -159,7 +172,26 @@ export class VoiceCall {
     this.turn = new AbortController();
     this.say(this.deps.greeting, this.turn.signal);
     this.log.push({ who: "assistant", text: this.deps.greeting });
+    if (this.deps.greetingInterruptible === false) {
+      this.greetingLocked = true;
+      void this.unlockAfterGreeting();
+    }
     this.watchSilence();
+  }
+
+  /**
+   * The greeting has been made and has had time to play at the far end: the
+   * caller may interrupt from here on. Anything they finished saying over it
+   * is their first turn now.
+   */
+  private async unlockAfterGreeting() {
+    await this.speech;
+    const sleep = this.deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+    await sleep(Math.max(0, this.playbackEndsAt - this.now()));
+    this.greetingLocked = false;
+    if (!this.turnWaiting || this.closed || this.hangingUp) return;
+    this.turnWaiting = false;
+    this.onEndOfTurn();
   }
 
   /**
@@ -324,7 +356,7 @@ export class VoiceCall {
   }
 
   private interrupt() {
-    if (!this.turn) return;
+    if (!this.turn || this.greetingLocked) return;
     this.turn.abort();
     this.turn = null;
     this.turnRunning = false;
@@ -337,6 +369,12 @@ export class VoiceCall {
   private onEndOfTurn() {
     const text = [...this.heard, this.interim].join(" ").replace(/\s+/g, " ").trim();
     if (!text || this.closed) return;
+    // Over a greeting that may not be interrupted: keep what they said and
+    // answer it when the greeting has finished.
+    if (this.greetingLocked) {
+      this.turnWaiting = true;
+      return;
+    }
     this.heard = [];
     this.interim = "";
     // Anything still playing from before is superseded by the new turn.

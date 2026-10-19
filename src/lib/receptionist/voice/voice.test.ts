@@ -135,7 +135,7 @@ describe("speaking speed", () => {
 
 function harness(
   respond: (text: string, hooks: TurnHooks, signal?: AbortSignal) => Promise<TurnResult>,
-  opts: { playbackSecondsPerPiece?: number } = {}
+  opts: { playbackSecondsPerPiece?: number; greetingInterruptible?: boolean } = {}
 ) {
   let clock = 0;
   let stt: SttHandlers | null = null;
@@ -167,6 +167,7 @@ function harness(
     tts,
     out: { audio: (b) => audio.push(b), clear, event: (e) => events.push(e), hangup },
     greeting: "Thank you for calling Shogo.",
+    greetingInterruptible: opts.greetingInterruptible,
     now: () => clock,
     silence: null,
     sleep: (ms) =>
@@ -311,6 +312,15 @@ describe("VoiceCall", () => {
     expect(h.events).toContainEqual({ type: "interrupted" });
   });
 
+  it("lets the caller talk over the greeting by default", async () => {
+    const h = harness(async () => done(""), { playbackSecondsPerPiece: 10 });
+    await h.call.start();
+    await tick();
+    h.stt().onInterim("hello is that");
+    expect(h.clear).toHaveBeenCalledTimes(1);
+    expect(h.events).toContainEqual({ type: "interrupted" });
+  });
+
   it("does not treat a single word as an interruption", async () => {
     const h = harness(async () => done(""), { playbackSecondsPerPiece: 10 });
     await h.call.start();
@@ -354,5 +364,68 @@ describe("VoiceCall", () => {
     h.stt().onEndOfTurn();
     await tick();
     expect(h.engine.respond).not.toHaveBeenCalled();
+  });
+});
+
+describe("VoiceCall with a greeting that cannot be interrupted", () => {
+  const reply = async (_t: string, hooks: TurnHooks) => {
+    hooks.onText?.("Lovely, delivery it is. ");
+    return done("Lovely, delivery it is.");
+  };
+
+  it("plays the greeting to the end, then answers what was said over it", async () => {
+    const h = harness(reply, { playbackSecondsPerPiece: 10, greetingInterruptible: false });
+    await h.call.start();
+    await tick();
+
+    // Ten seconds of greeting queued; two seconds in, the caller talks and stops.
+    h.advance(2_000);
+    h.stt().onInterim("hi it's for");
+    h.stt().onFinal("hi it's for delivery please");
+    h.stt().onEndOfTurn();
+    await tick(10);
+    expect(h.clear).not.toHaveBeenCalled();
+    expect(h.events).not.toContainEqual({ type: "interrupted" });
+    expect(h.engine.respond).not.toHaveBeenCalled();
+
+    // The greeting finishes playing: now they are answered, with everything they said.
+    h.wait();
+    await tick(10);
+    expect(h.engine.respond).toHaveBeenCalledWith("hi it's for delivery please", expect.anything(), expect.anything());
+    expect(h.spoken).toEqual(["Thank you for calling Shogo.", "Lovely, delivery it is."]);
+  });
+
+  it("can be interrupted as normal once the greeting is over", async () => {
+    let seenSignal: AbortSignal | undefined;
+    const h = harness(
+      async (_t, hooks, signal) => {
+        seenSignal = signal;
+        hooks.onText?.("We do collection and delivery, every night but Monday and Tuesday. ");
+        return done("…");
+      },
+      { playbackSecondsPerPiece: 10, greetingInterruptible: false }
+    );
+    await h.call.start();
+    await tick();
+    h.wait(); // the greeting has played
+    await tick();
+    h.stt().onFinal("are you open tonight");
+    h.stt().onEndOfTurn();
+    await tick(10);
+
+    h.advance(1_000);
+    h.stt().onInterim("actually never mind");
+    expect(h.clear).toHaveBeenCalledTimes(1);
+    expect(seenSignal?.aborted).toBe(true);
+  });
+
+  it("does nothing extra when nobody speaks over the greeting", async () => {
+    const h = harness(reply, { playbackSecondsPerPiece: 10, greetingInterruptible: false });
+    await h.call.start();
+    await tick();
+    h.wait();
+    await tick(10);
+    expect(h.engine.respond).not.toHaveBeenCalled();
+    expect(h.spoken).toEqual(["Thank you for calling Shogo."]);
   });
 });

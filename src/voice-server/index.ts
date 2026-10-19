@@ -204,6 +204,9 @@ async function main() {
       // No "One moment." while a tool runs: the shop doesn't want it said.
       // The model's own words before a tool still go out as normal.
       filler: "",
+      // The shop's greeting always plays to the end: talking over it does
+      // not cut it off, and what the caller said is answered after it.
+      greetingInterruptible: false,
       out: {
         audio: (chunk) => {
           if (ws.readyState === ws.OPEN) ws.send(chunk, { binary: true });
@@ -334,6 +337,9 @@ async function main() {
       // No "One moment." while a tool runs: the shop doesn't want it said.
       // The model's own words before a tool still go out as normal.
       filler: "",
+      // The shop's greeting always plays to the end: talking over it does
+      // not cut it off, and what the caller said is answered after it.
+      greetingInterruptible: false,
       out: {
         audio: (chunk) => {
           if (!audioOut) console.log(`[VOICE] phone call ${start.callSid}: first speech sent`);
