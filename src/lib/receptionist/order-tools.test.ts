@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type Anthropic from "@anthropic-ai/sdk";
 import { END_CALL_TOOL, ReceptionistEngine, type StreamingClient } from "./engine";
 import { CARBS_QUESTION, ORDER_TOOLS, orderTools, type OrderToolDeps } from "./order-tools";
+import { withOrder } from "./outcomes";
 import { buildCallContext, buildStableSystem, greetingFor } from "./prompt";
 import { MOCK_HIXON_ZONES } from "@/lib/delivery";
 import { ADDRESSES, NAMED } from "@/lib/address-lookup.fixtures";
@@ -35,7 +36,7 @@ const MENU = [
 function setup(over: Partial<OrderToolDeps> = {}) {
   let turn = 1;
   const placed: PlaceOrderInput[] = [];
-  const amended: Array<{ orderId: string; input: PlaceOrderInput }> = [];
+  const checked: PlaceOrderInput[] = [];
   const deps: OrderToolDeps = {
     menu: MENU,
     delivery: { enabled: true, zones: MOCK_HIXON_ZONES, minOrderPence: 1500, freeOverPence: null },
@@ -47,9 +48,9 @@ function setup(over: Partial<OrderToolDeps> = {}) {
       placed.push(input);
       return { ok: true, order: { id: "o1", number: 1042, totalPence: 0, deliveryFeePence: 150, promisedAt: new Date(), readyInMinutes: 45 } };
     },
-    amendOrder: async (orderId, input) => {
-      amended.push({ orderId, input });
-      return { ok: true, order: { id: orderId, number: 1042, totalPence: 0, deliveryFeePence: 150, promisedAt: new Date(), readyInMinutes: 40 } };
+    checkOrder: async (input) => {
+      checked.push(input);
+      return { ok: true, totalPence: 0, deliveryFeePence: 0, readyInMinutes: input.type === "delivery" ? 45 : 20 };
     },
     recentOrders: async () => [],
     saveMessage: vi.fn(async () => "m1"),
@@ -59,17 +60,17 @@ function setup(over: Partial<OrderToolDeps> = {}) {
   const tools = orderTools(deps);
   /** The caller speaks: a new turn. */
   const caller = () => turn++;
-  /** "That's everything" ... "Yes": read back, the caller agrees, placed. */
-  const confirmAndPlace = async () => {
+  /** "That's everything" ... "Yes": read back, and the caller agrees. */
+  const confirmAndAgree = async () => {
     const asked = await tools.execute("confirm_order", {});
     caller();
-    return { asked, placed: await tools.execute("place_order", {}) };
+    return { asked, agreed: await tools.execute("agree_order", {}) };
   };
-  return { ...tools, placed, amended, caller, confirmAndPlace };
+  return { ...tools, placed, checked, caller, confirmAndAgree };
 }
 
 describe("taking an order", () => {
-  it("takes a delivery: checks it with the caller, then places it and gives the price", async () => {
+  it("takes a delivery: checks it with the caller, gives the price on 'yes', and sends it when the call ends", async () => {
     const t = setup();
     await t.execute("set_order_type", { type: "delivery" });
     const details = (await t.execute("set_customer_details", {
@@ -91,23 +92,28 @@ describe("taking an order", () => {
     // 2 x 6.90 + 3.30 = 17.10, plus 1.50 delivery.
     expect(added.order.total).toBe("£18.60");
 
-    // "That's everything": read back as a question, no price, nothing placed.
+    // "That's everything": read back as a question, no price.
     const asked = (await t.execute("confirm_order", {})) as { ready: boolean; say: string };
     expect(asked.say).toBe("So that's two Chicken Chow Mein and one Egg Fried Rice, for delivery to 14 Smithy Lane, ST18 0PQ, is that correct?");
-    expect(t.placed).toHaveLength(0);
 
-    // Placing in the same breath as the question is refused.
-    expect(await t.execute("place_order", {})).toMatchObject({ success: false, error: expect.stringContaining("wait for the caller") });
-    expect(t.placed).toHaveLength(0);
+    // Taking the yes as given, in the same breath as the question, is refused.
+    expect(await t.execute("agree_order", {})).toMatchObject({ agreed: false, error: expect.stringContaining("wait for the caller") });
+    expect(t.draft.agreed).toBe(false);
 
-    // "Yes."
+    // "Yes": checked and priced, but nothing goes to the kitchen yet.
     t.caller();
-    const placed = (await t.execute("place_order", {})) as { success: boolean; orderNumber: number; say: string; then: string };
-    expect(placed).toMatchObject({ success: true, orderNumber: 1042 });
-    expect(placed.say).toBe("That's eighteen pounds sixty including one pound fifty delivery, cash on delivery. It'll be with you in about 45 minutes.");
-    // No goodbye yet: that waits for the caller.
-    expect(placed.say).not.toContain("See you soon");
-    expect(placed.then).toContain("See you soon!");
+    const agreed = (await t.execute("agree_order", {})) as { agreed: boolean; say: string; then: string };
+    expect(agreed.agreed).toBe(true);
+    expect(agreed.say).toBe("That's eighteen pounds sixty including one pound fifty delivery, cash on delivery. It'll be with you in about 45 minutes.");
+    expect(agreed.say).not.toContain("See you soon");
+    expect(agreed.then).toContain("See you soon!");
+    expect(t.checked).toHaveLength(1);
+    expect(t.placed).toHaveLength(0);
+
+    // The call ends: now it goes, once.
+    expect(await t.finish()).toEqual({ orderId: "o1", number: 1042 });
+    expect(await t.finish()).toEqual({ orderId: "o1", number: 1042 });
+    expect(t.placed).toHaveLength(1);
     expect(t.placed[0]).toMatchObject({
       type: "delivery",
       customer: { name: "Sarah", phone: "+447700900123", postcode: "ST18 0PQ" },
@@ -116,10 +122,16 @@ describe("taking an order", () => {
         { menuItemId: "efr", quantity: 1 },
       ],
     });
-    // Asked again with nothing changed: the same order, not a second one.
-    expect(await t.execute("place_order", {})).toMatchObject({ success: true, orderNumber: 1042 });
-    expect(t.placed).toHaveLength(1);
-    expect(t.amended).toHaveLength(0);
+  });
+
+  it("sends nothing when the call ends before the caller agrees", async () => {
+    const t = setup();
+    await t.execute("set_order_type", { type: "collection" });
+    await t.execute("set_customer_details", { name: "Dave" });
+    await t.execute("add_items", { items: [{ code: "147", quantity: 1 }] });
+    await t.execute("confirm_order", {});
+    expect(await t.finish()).toBeNull();
+    expect(t.placed).toHaveLength(0);
   });
 
   it("needs the order read back again after it changes", async () => {
@@ -130,10 +142,10 @@ describe("taking an order", () => {
     await t.execute("confirm_order", {});
     t.caller(); // "Oh, and an egg fried rice."
     await t.execute("add_items", { items: [{ code: "170", quantity: 1 }] });
-    expect(await t.execute("place_order", {})).toMatchObject({ success: false, error: expect.stringContaining("hasn't been read back") });
-    const again = (await t.confirmAndPlace()) as { asked: { say: string }; placed: { success: boolean } };
+    expect(await t.execute("agree_order", {})).toMatchObject({ agreed: false, error: expect.stringContaining("hasn't been read back") });
+    const again = (await t.confirmAndAgree()) as { asked: { say: string }; agreed: { agreed: boolean } };
     expect(again.asked.say).toContain("one Chicken Chow Mein and one Egg Fried Rice, for collection, is that correct?");
-    expect(again.placed.success).toBe(true);
+    expect(again.agreed.agreed).toBe(true);
   });
 
   it("confirms only what was just added when a dish is added again", async () => {
@@ -144,35 +156,62 @@ describe("taking an order", () => {
     expect(t.draft.lines[0].quantity).toBe(2);
   });
 
-  it("updates the order already sent when the caller changes it afterwards", async () => {
+  it("takes a change after 'yes' as part of the order, once it's agreed again", async () => {
     const t = setup();
     await t.execute("set_order_type", { type: "collection" });
     await t.execute("set_customer_details", { name: "Dave" });
     await t.execute("add_items", { items: [{ code: "94", quantity: 1 }] });
     await t.execute("confirm_order", {}); // "Would you like any rice or chips?" "No thanks."
-    await t.confirmAndPlace();
+    await t.confirmAndAgree();
     // "Actually, make that two."
     const changed = (await t.execute("change_item", { line: 1, quantity: 2 })) as { note?: string };
     expect(changed.note).toContain("confirm_order");
-    const again = (await t.confirmAndPlace()) as { asked: { say: string }; placed: { success: boolean; say: string } };
+    expect(t.draft.agreed).toBe(false);
+    const again = (await t.confirmAndAgree()) as { asked: { say: string }; agreed: { agreed: boolean } };
     expect(again.asked.say).toContain("two Sweet & Sour Chicken Hong Kong Style, for collection, is that correct?");
-    expect(again.placed.success).toBe(true);
+    expect(again.agreed.agreed).toBe(true);
+    await t.finish();
     expect(t.placed).toHaveLength(1);
-    expect(t.amended).toEqual([{ orderId: "o1", input: expect.objectContaining({ lines: [{ menuItemId: "ss", quantity: 2, notes: null }] }) }]);
+    expect(t.placed[0].lines).toEqual([{ menuItemId: "ss", quantity: 2, notes: null }]);
   });
 
-  it("says so when a change comes too late", async () => {
+  it("sends what was agreed, and tells the staff, if a change wasn't agreed before the call ended", async () => {
+    const saveMessage = vi.fn(async () => "m1");
+    const t = setup({ saveMessage });
+    await t.execute("set_order_type", { type: "collection" });
+    await t.execute("set_customer_details", { name: "Dave" });
+    await t.execute("add_items", { items: [{ code: "147", quantity: 1 }] });
+    await t.confirmAndAgree();
+    await t.execute("add_items", { items: [{ code: "170", quantity: 1 }] }); // ...and then they hang up
+    await t.finish();
+    expect(t.placed[0].lines).toEqual([{ menuItemId: "cm", quantity: 1, notes: null }]);
+    expect(saveMessage).toHaveBeenCalledWith(expect.objectContaining({ body: expect.stringContaining("Order #1042") }));
+  });
+
+  it("tells the staff to ring back if the order can't be sent once the call has ended", async () => {
+    const saveMessage = vi.fn(async () => "m1");
     const t = setup({
-      amendOrder: async () => ({ ok: false, code: "started", message: "The kitchen has already started that order." }),
+      saveMessage,
+      placeOrder: async () => ({ ok: false, code: "sold_out", message: "Chicken Chow Mein has just sold out." }),
     });
     await t.execute("set_order_type", { type: "collection" });
     await t.execute("set_customer_details", { name: "Dave" });
-    await t.execute("add_items", { items: [{ code: "94", quantity: 1 }] });
-    await t.execute("confirm_order", {}); // the rice question
-    await t.confirmAndPlace();
-    await t.execute("add_items", { items: [{ code: "170", quantity: 1 }] });
-    const late = (await t.confirmAndPlace()) as { placed: unknown };
-    expect(late.placed).toMatchObject({ success: false, then: expect.stringContaining("take a message") });
+    await t.execute("add_items", { items: [{ code: "147", quantity: 1 }] });
+    await t.confirmAndAgree();
+    expect(await t.finish()).toBeNull();
+    expect(saveMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ name: "Dave", phone: "+447700900123", body: expect.stringContaining("Please ring Dave, 07700 900123 back") })
+    );
+  });
+
+  it("tells the caller straight away if the order can't be made", async () => {
+    const t = setup({ checkOrder: async () => ({ ok: false, code: "sold_out", message: "Chicken Chow Mein has just sold out." }) });
+    await t.execute("set_order_type", { type: "collection" });
+    await t.execute("set_customer_details", { name: "Dave" });
+    await t.execute("add_items", { items: [{ code: "147", quantity: 1 }] });
+    const { agreed } = (await t.confirmAndAgree()) as { agreed: { agreed: boolean; error: string } };
+    expect(agreed).toMatchObject({ agreed: false, error: "Chicken Chow Mein has just sold out." });
+    expect(t.draft.agreed).toBe(false);
   });
 
   it("offers rice or chips once, when the caller has finished and ordered none", async () => {
@@ -189,9 +228,10 @@ describe("taking an order", () => {
 
     // "Yes, an egg fried rice": added and read back, with no second question.
     await t.execute("add_items", { items: [{ code: "170", quantity: 1 }] });
-    const done = (await t.confirmAndPlace()) as { asked: { say: string }; placed: { success: boolean } };
+    const done = (await t.confirmAndAgree()) as { asked: { say: string }; agreed: { agreed: boolean } };
     expect(done.asked.say).toContain("one Sweet & Sour Chicken Hong Kong Style and one Egg Fried Rice, for collection");
-    expect(done.placed.success).toBe(true);
+    expect(done.agreed.agreed).toBe(true);
+    await t.finish();
     expect(t.placed[0].lines.map((l) => l.menuItemId)).toEqual(["ss", "efr"]);
   });
 
@@ -241,8 +281,9 @@ describe("taking an order", () => {
 
     await t.execute("set_customer_details", { name: "Sam" });
     await t.execute("add_items", { items: [{ code: "147", quantity: 3 }] });
-    const { asked } = (await t.confirmAndPlace()) as { asked: { say: string } };
+    const { asked } = (await t.confirmAndAgree()) as { asked: { say: string } };
     expect(asked.say).toContain("for delivery to 12 Smithy Lane, Hixon, ST18 0PQ");
+    await t.finish();
     expect(t.placed[0].customer).toMatchObject({ addressLine1: "12 Smithy Lane", addressLine2: "Hixon", town: "Stafford", postcode: "ST18 0PQ" });
   });
 
@@ -449,7 +490,7 @@ describe("a whole call through the engine", () => {
   const use = (id: string, name: string, input: object) => ({ type: "tool_use", id, name, input }) as Anthropic.ToolUseBlock;
   const say = (text: string) => ({ type: "text", text, citations: null }) as Anthropic.TextBlock;
 
-  it("checks the order, places it on 'yes', gives the price, and says goodbye when the caller does", async () => {
+  it("checks the order, agrees it on 'yes', says goodbye when the caller does, and sends it at the end", async () => {
     const placed: PlaceOrderInput[] = [];
     const tools = orderTools({
       menu: MENU,
@@ -462,9 +503,7 @@ describe("a whole call through the engine", () => {
         placed.push(input);
         return { ok: true, order: { id: "o9", number: 1009, totalPence: 1160, deliveryFeePence: 0, promisedAt: new Date(), readyInMinutes: 20 } };
       },
-      amendOrder: async () => {
-        throw new Error("nothing to amend");
-      },
+      checkOrder: async () => ({ ok: true, totalPence: 1160, deliveryFeePence: 0, readyInMinutes: 20 }),
       recentOrders: async () => [],
       saveMessage: async () => "m",
       findAddresses: async () => ({ ok: false, reason: "not_configured" }),
@@ -482,12 +521,12 @@ describe("a whole call through the engine", () => {
         // 3 "That's everything."
         [use("d", "confirm_order", {})],
         [say("Would you like any rice or chips with that?")],
-        // 4 "No thanks." A model that jumps the gun tries to place it at once.
+        // 4 "No thanks." A model that jumps the gun takes the yes as given.
         [use("e", "confirm_order", {})],
-        [use("f", "place_order", {})],
+        [use("f", "agree_order", {})],
         [say(question)],
         // 5 "Yes."
-        [use("g", "place_order", {})],
+        [use("g", "agree_order", {})],
         [say(priceAndTime)],
         // 6 "Lovely, thanks, bye."
         [say("See you soon!"), use("h", "end_call", {})],
@@ -506,19 +545,31 @@ describe("a whole call through the engine", () => {
 
     const t4 = await engine.respond("No thanks.");
     expect(t4.tools.find((t) => t.name === "confirm_order")?.result).toMatchObject({ ready: true, say: question });
-    expect(t4.tools.find((t) => t.name === "place_order")?.result).toMatchObject({ success: false });
-    expect(placed).toHaveLength(0);
+    expect(t4.tools.find((t) => t.name === "agree_order")?.result).toMatchObject({ agreed: false });
     expect(t4.text).toBe(question);
 
     const t5 = await engine.respond("Yes.");
-    expect(t5.tools[0].result).toMatchObject({ success: true, orderNumber: 1009, say: priceAndTime });
-    expect(placed).toHaveLength(1);
-    expect(placed[0].lines.map((l) => l.menuItemId)).toEqual(["cb", "soup"]);
+    expect(t5.tools[0].result).toMatchObject({ agreed: true, say: priceAndTime });
     expect(t5.text).toBe(priceAndTime);
     expect(t5.endCall).toBe(false);
 
     const t6 = await engine.respond("Lovely, thanks, bye.");
     expect(t6.text).toBe("See you soon!");
     expect(t6.endCall).toBe(true);
+
+    // Nothing has gone to the kitchen during the call: it goes as it ends.
+    expect(placed).toHaveLength(0);
+    expect(await tools.finish()).toEqual({ orderId: "o9", number: 1009 });
+    expect(placed).toHaveLength(1);
+    expect(placed[0].lines.map((l) => l.menuItemId)).toEqual(["cb", "soup"]);
+  });
+});
+
+describe("the call log", () => {
+  it("records an order sent at the end of the call in place of a bare goodbye", () => {
+    expect(withOrder(["enquiry"], true)).toEqual(["ordered"]);
+    expect(withOrder(["hung_up"], true)).toEqual(["ordered"]);
+    expect(withOrder(["message"], true)).toEqual(["ordered", "message"]);
+    expect(withOrder(["enquiry"], false)).toEqual(["enquiry"]);
   });
 });

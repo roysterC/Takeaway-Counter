@@ -43,6 +43,7 @@ async function main() {
   const { DeepgramStt, ElevenLabsTts, labVoiceRate } = await import("@/lib/receptionist/voice/providers");
   const { logCall } = await import("@/lib/receptionist/call-log");
   const { GOODBYE } = await import("@/lib/receptionist/order-tools");
+  const { withOrder } = await import("@/lib/receptionist/outcomes");
   const { clearFrame, mediaFrames, parseTwilioFrame } = await import("@/lib/twilio-voice");
   const fakes = FAKES ? await import("./fakes") : null;
 
@@ -208,9 +209,9 @@ async function main() {
       // The shop's greeting always plays to the end: talking over it does
       // not cut it off, and what the caller said is answered after it.
       greetingInterruptible: false,
-      // Once the order is in, silence means they have nothing more: say
+      // Once the order is agreed, silence means they have nothing more: say
       // goodbye rather than asking if they are still there.
-      quietGoodbye: () => (session.draft.placed ? GOODBYE : null),
+      quietGoodbye: () => (session.draft.agreed ? GOODBYE : null),
       out: {
         audio: (chunk) => {
           if (ws.readyState === ws.OPEN) ws.send(chunk, { binary: true });
@@ -236,7 +237,11 @@ async function main() {
       clearInterval(ping);
       call.close();
       labCalls--;
-      // Not written to the call log: lab calls are tests, not customers.
+      // Not written to the call log: lab calls are tests, not customers. An
+      // agreed order still goes to the board, marked as a test, once the
+      // last turn has settled.
+      const settled = Promise.race([call.settled(), new Promise((r) => setTimeout(r, 5000))]);
+      void settled.then(() => session.finish()).catch((err) => console.error("[VOICE] could not send the lab order:", err));
     };
 
     ws.on("message", (data, isBinary) => {
@@ -344,9 +349,9 @@ async function main() {
       // The shop's greeting always plays to the end: talking over it does
       // not cut it off, and what the caller said is answered after it.
       greetingInterruptible: false,
-      // Once the order is in, silence means they have nothing more: say
+      // Once the order is agreed, silence means they have nothing more: say
       // goodbye rather than asking if they are still there.
-      quietGoodbye: () => (session.draft.placed ? GOODBYE : null),
+      quietGoodbye: () => (session.draft.agreed ? GOODBYE : null),
       out: {
         audio: (chunk) => {
           if (!audioOut) console.log(`[VOICE] phone call ${start.callSid}: first speech sent`);
@@ -386,17 +391,22 @@ async function main() {
       call.close();
       phoneCalls--;
       const endedAt = new Date();
-      // After the last turn has settled, so an order placed as they hung up
-      // is in the outcome; never waiting more than a few seconds for it.
+      // The call is over: the order they agreed goes to the kitchen now.
+      // After the last turn has settled, so an order agreed as they hung up
+      // is sent; never waiting more than a few seconds for it.
       const settled = Promise.race([call.settled(), new Promise((r) => setTimeout(r, 5000))]);
       void settled.then(async () => {
+        const placed = await session.finish().catch((err) => {
+          console.error("[VOICE] could not send the order to the kitchen:", err);
+          return null;
+        });
         try {
           await logCall(pass.organizationId, {
             callerNumber: pass.callerNumber,
             startedAt: new Date(call.startedAt),
             endedAt,
-            outcomes: call.outcomes(),
-            orderId: session.draft.placed?.orderId ?? null,
+            outcomes: withOrder(call.outcomes(), placed !== null),
+            orderId: placed?.orderId ?? null,
           });
         } catch (err) {
           console.error("[VOICE] could not log the call:", err);

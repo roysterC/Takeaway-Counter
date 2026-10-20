@@ -17,8 +17,9 @@ Two parts:
    Mein."). When the caller says that's everything it asks "Would you like
    any rice or chips with that?" if the order has none, then reads the order
    back ("So that's ..., for collection, is that correct?"). On "yes" it
-   sends it to the kitchen and gives the price and how long. It says "See
-   you soon!" and hangs up when the caller says goodbye or goes quiet.
+   gives the price and how long, says "See you soon!" and hangs up when the
+   caller says goodbye or goes quiet, and sends the order to the kitchen as
+   the call ends.
    Regulars are recognised by their number ("Is that to 14 Smithy Lane
    again?"). It also tells callers where their order is, and takes messages
    for the staff.
@@ -41,7 +42,7 @@ Payment is cash only, as the shop's leaflet says. Printing is not built yet.
 caller ─► Twilio number ─► POST /api/twilio/voice (CRM: checks signature, finds the shop)
        ◄─ TwiML <Connect><Stream> ─► voice server /voice/phone (npm run voice)
             Deepgram (speech → text) ─► Claude + order tools ─► ElevenLabs (text → speech)
-            place_order ─► orders table ─► appears on the Orders board within 5 seconds
+            agree_order ─► (call ends) ─► orders table ─► appears on the Orders board within 5 seconds
 ```
 
 The receptionist does the talking; the code keeps the books.
@@ -56,13 +57,15 @@ The receptionist does the talking; the code keeps the books.
   omelettes with chips, set meals), and can be set per dish in **Menu**.
   The question is asked once, only after the caller has finished ordering,
   and never when correcting an order already sent.
-- **Nothing is placed until the caller says yes.** The read-back rule is
-  enforced in code (`src/lib/order-draft.ts`): an order is only placed if it
-  is unchanged since it was read back *and* the caller has spoken since. A
-  change after placing goes through the same check and updates the order
-  already sent, keeping its number, while it is still New on the board;
-  once the kitchen has started it, the change becomes a message for the
-  staff.
+- **Nothing reaches the kitchen until the call ends.** The caller agrees
+  the order when it is read back; the agreement rule is enforced in code
+  (`src/lib/order-draft.ts`): only an order unchanged since its read-back,
+  with the caller having spoken since, can be agreed. The agreed order is
+  checked on the spot (so the caller hears the real price and any problem),
+  and sent to the kitchen when the call ends, however it ends. Anything the
+  caller changes before hanging up is simply part of the order once it's
+  agreed again. If it can't be sent at that point (a dish sold out in the
+  last minute), the staff get a message to ring the caller back.
 - **Nothing that was said is stored.** Each call is logged only as what it
   came to: ordered, checked an order, left a message, enquiry or hung up.
 
